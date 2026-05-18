@@ -4,8 +4,10 @@ import argparse
 import asyncio
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event, Lock
 
 from rich.segment import Segment
 from rich.syntax import Syntax
@@ -16,19 +18,27 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.geometry import Size
 from textual.scroll_view import ScrollView
+from textual.screen import ModalScreen
 from textual.strip import Strip
-from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
+from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Static, TextArea
 
 
 PREVIEW_ENABLED = True
 PREVIEW_DEBOUNCE_SECONDS = 0.2
-PREVIEW_EXTRA_LINES = 2
-PREVIEW_FALLBACK_LINES = 40
 PREVIEW_MAX_COLUMNS = 240
 PREVIEW_MAX_LINE_BYTES = 8_192
+PREVIEW_RENDER_COLUMNS = PREVIEW_MAX_COLUMNS + 16
+PREVIEW_LINE_CACHE_SIZE = 400
+PREVIEW_FULL_INDEX_MAX_BYTES = 1 * 1024 * 1024
+PREVIEW_BACKGROUND_INDEX_MAX_BYTES = 2 * 1024 * 1024
+PREVIEW_INITIAL_INDEX_LINES = 1_200
 CHECK_COLUMN_WIDTH = 6
+STATUS_COLUMN_WIDTH = 8
 EXTENSION_COLUMN_WIDTH = 10
 SIZE_COLUMN_WIDTH = 8
+PATH_COLUMN_MIN_WIDTH = 8
+PATH_SCROLL_SEPARATOR = "   "
+PATH_SCROLL_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -99,36 +109,122 @@ class SvnStatusEntry:
         return self.raw_status.strip() or "?"
 
 
-@dataclass(frozen=True)
+@dataclass
 class PreviewDocument:
     path: Path
     line_offsets: list[int]
     lexer: str
+    file_size: int
+    next_offset: int
+    indexed_complete: bool
+    continue_indexing: bool
+    status_message: str | None = None
+    line_lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
     @property
     def line_count(self) -> int:
-        return len(self.line_offsets)
+        with self.line_lock:
+            extra_line = 1 if self.status_message else 0
+            return len(self.line_offsets) + extra_line
+
+    def line_offset_at(self, index: int) -> int | None:
+        with self.line_lock:
+            if index < 0 or index >= len(self.line_offsets):
+                return None
+            return self.line_offsets[index]
+
+    def apply_index_result(
+        self,
+        new_offsets: list[int],
+        next_offset: int,
+        indexed_complete: bool,
+        status_message: str | None,
+    ) -> None:
+        with self.line_lock:
+            self.line_offsets.extend(new_offsets)
+            self.next_offset = next_offset
+            self.indexed_complete = indexed_complete
+            self.continue_indexing = False
+            self.status_message = status_message
+
+
+class PreviewCancelToken:
+    def __init__(self) -> None:
+        self._event = Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+
+@dataclass(frozen=True)
+class PreviewCancelled:
+    pass
+
+
+@dataclass(frozen=True)
+class PreviewIndexScan:
+    offsets: list[int]
+    next_offset: int
+    complete: bool
+    status_message: str | None = None
+
+
+async def run_command_text(args: list[str]) -> str:
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    stdout_text = stdout.decode("utf-8", errors="replace")
+    stderr_text = stderr.decode("utf-8", errors="replace")
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            args,
+            output=stdout_text,
+            stderr=stderr_text,
+        )
+    return stdout_text
+
+
+def build_svn_commit_args(message: str, paths: list[Path]) -> list[str]:
+    return ["svn", "commit", "-m", message, "--", *(str(path) for path in paths)]
 
 
 class SvnClient:
     def __init__(self, target: Path) -> None:
         self.target = target.expanduser().resolve()
         self.display_root = self.target if self.target.is_dir() else self.target.parent
-        self.root = self._find_working_copy_root()
+        self.root = self.display_root
+        self.root_loaded = False
 
-    def status(self) -> list[SvnStatusEntry]:
-        result = subprocess.run(
-            ["svn", "st", str(self.target)],
-            check=True,
-            capture_output=True,
-            text=True,
+    async def ensure_working_copy_root(self) -> None:
+        if self.root_loaded:
+            return
+        probe = self.target if self.target.is_dir() else self.target.parent
+        stdout = await run_command_text(
+            ["svn", "info", "--show-item", "wc-root", str(probe)]
         )
+        self.root = Path(stdout.strip()).resolve()
+        self.root_loaded = True
+
+    async def status(self) -> list[SvnStatusEntry]:
+        await self.ensure_working_copy_root()
+        stdout = await run_command_text(["svn", "st", str(self.target)])
         entries: list[SvnStatusEntry] = []
-        for line in result.stdout.splitlines():
+        for line in stdout.splitlines():
             entry = parse_svn_status_line(line, self.root)
             if entry is not None:
                 entries.append(entry)
         return entries
+
+    async def commit(self, message: str, paths: list[Path]) -> str:
+        return await run_command_text(build_svn_commit_args(message, paths))
 
     def open_diff(self, entry: SvnStatusEntry) -> None:
         if entry.text_status in {"?", "I"}:
@@ -159,17 +255,6 @@ class SvnClient:
         finally:
             base_path.unlink(missing_ok=True)
 
-    def _find_working_copy_root(self) -> Path:
-        probe = self.target if self.target.is_dir() else self.target.parent
-        result = subprocess.run(
-            ["svn", "info", "--show-item", "wc-root", str(probe)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return Path(result.stdout.strip()).resolve()
-
-
 class StatusRow(ListItem):
     def __init__(
         self,
@@ -183,6 +268,9 @@ class StatusRow(ListItem):
         self.theme = theme
         self.selected_for_commit = False
         self.label = Label()
+        self.row_width = 0
+        self.is_highlighted = False
+        self.path_scroll_offset = 0
 
     def compose(self) -> ComposeResult:
         yield self.label
@@ -194,14 +282,39 @@ class StatusRow(ListItem):
         self.selected_for_commit = not self.selected_for_commit
         self.refresh_label()
 
-    def refresh_label(self) -> None:
+    def refresh_label(
+        self,
+        row_width: int | None = None,
+        is_highlighted: bool | None = None,
+        path_scroll_offset: int | None = None,
+    ) -> None:
+        if row_width is not None:
+            self.row_width = row_width
+        if is_highlighted is not None:
+            self.is_highlighted = is_highlighted
+        if path_scroll_offset is not None:
+            self.path_scroll_offset = path_scroll_offset
         marker = (
             self.theme.selected_marker
             if self.selected_for_commit
             else self.theme.unselected_marker
         )
         shown_path = relative_path(self.entry.path, self.root)
-        self.label.update(format_status_row(self.entry, shown_path, marker, self.theme))
+        self.label.update(
+            format_status_row(
+                self.entry,
+                shown_path,
+                marker,
+                self.theme,
+                self.row_width,
+                self.is_highlighted,
+                self.path_scroll_offset,
+            )
+        )
+
+    def path_needs_scroll(self, row_width: int) -> bool:
+        shown_path = relative_path(self.entry.path, self.root)
+        return len(str(shown_path)) > path_column_width(row_width)
 
 
 class PreviewView(ScrollView):
@@ -209,7 +322,7 @@ class PreviewView(ScrollView):
         super().__init__(**kwargs)
         self.document: PreviewDocument | None = None
         self.message: Text | None = Text("No changed file selected.", style="dim")
-        self.line_cache: dict[int, Strip] = {}
+        self.line_cache: OrderedDict[int, Strip] = OrderedDict()
 
     def set_message(self, message: Text) -> None:
         self.document = None
@@ -219,13 +332,14 @@ class PreviewView(ScrollView):
         self.scroll_to(x=0, y=0, animate=False, immediate=True)
         self.refresh(layout=True)
 
-    def set_document(self, document: PreviewDocument) -> None:
+    def set_document(self, document: PreviewDocument, reset_scroll: bool = True) -> None:
         self.document = document
         self.message = None
         self.line_cache.clear()
         height = max(1, document.line_count)
-        self.virtual_size = Size(PREVIEW_MAX_COLUMNS + 16, height)
-        self.scroll_to(x=0, y=0, animate=False, immediate=True)
+        self.virtual_size = Size(PREVIEW_RENDER_COLUMNS, height)
+        if reset_scroll:
+            self.scroll_to(x=0, y=0, animate=False, immediate=True)
         self.refresh(layout=True)
 
     def render_line(self, y: int) -> Strip:
@@ -246,6 +360,10 @@ class PreviewView(ScrollView):
         if strip is None:
             strip = self.render_document_line(document_y)
             self.line_cache[document_y] = strip
+            if len(self.line_cache) > PREVIEW_LINE_CACHE_SIZE:
+                self.line_cache.popitem(last=False)
+        else:
+            self.line_cache.move_to_end(document_y)
         return strip.crop_pad(
             width,
             int(self.scroll_x),
@@ -255,6 +373,13 @@ class PreviewView(ScrollView):
 
     def render_document_line(self, y: int) -> Strip:
         assert self.document is not None
+        offset = self.document.line_offset_at(y)
+        if offset is None:
+            if self.document.status_message is not None:
+                return self.render_text_line(
+                    Text(self.document.status_message, style="dim")
+                )
+            return Strip.blank(self.size.width, self.visual_style.rich_style)
         line = read_preview_line(self.document, y)
         syntax = Syntax(
             line,
@@ -270,7 +395,7 @@ class PreviewView(ScrollView):
         return self.render_rich_line(text)
 
     def render_rich_line(self, renderable: object) -> Strip:
-        options = self.app.console.options.update_width(max(1, self.size.width))
+        options = self.app.console.options.update_width(PREVIEW_RENDER_COLUMNS)
         lines = self.app.console.render_lines(renderable, options, pad=False)
         segments = lines[0] if lines else []
         normalized = [
@@ -278,6 +403,61 @@ class PreviewView(ScrollView):
             for segment in segments
         ]
         return Strip(normalized)
+
+
+class CommitMessageDialog(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+enter", "submit", "Commit"),
+    ]
+
+    def __init__(self, file_count: int) -> None:
+        super().__init__()
+        self.file_count = file_count
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="commit-dialog"):
+            yield Label(f"Commit Message ({self.file_count} files)", id="commit-title")
+            yield TextArea(
+                "",
+                id="commit-message",
+                show_line_numbers=False,
+                placeholder="Enter commit message",
+            )
+            with Horizontal(id="commit-actions"):
+                yield Button("Esc Cancel", id="commit-cancel")
+                yield Button("Ctrl+Enter Commit", variant="success", id="commit-confirm")
+
+    def on_mount(self) -> None:
+        self.query_one("#commit-message", TextArea).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_submit(self) -> None:
+        message = self.query_one("#commit-message", TextArea).text.strip()
+        self.dismiss(message)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "commit-cancel":
+            self.action_cancel()
+            return
+        if event.button.id == "commit-confirm":
+            self.action_submit()
+
+
+class HelpDialog(ModalScreen[None]):
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog"):
+            yield Label("Help", id="help-title")
+            yield Static(format_help_text(), id="help-content")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class SvnTui(App[None]):
@@ -340,12 +520,82 @@ class SvnTui(App[None]):
     StatusRow {
         height: 1;
     }
+
+    CommitMessageDialog {
+        align: center middle;
+    }
+
+    #commit-dialog {
+        width: 76;
+        height: 18;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #commit-title {
+        height: 1;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #commit-message {
+        height: 7;
+        margin-top: 1;
+    }
+
+    #commit-actions {
+        width: 1fr;
+        height: 3;
+        margin-top: 1;
+        align: right bottom;
+    }
+
+    #commit-actions Button {
+        height: 3;
+        margin-left: 1;
+    }
+
+    #commit-cancel {
+        width: 14;
+    }
+
+    #commit-confirm {
+        width: 24;
+    }
+
+    HelpDialog {
+        align: center middle;
+    }
+
+    #help-dialog {
+        width: 78;
+        height: 23;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #help-title {
+        height: 1;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #help-content {
+        height: 1fr;
+        margin-top: 1;
+    }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh_status", "Refresh"),
         Binding("space", "toggle_entry", "Stage"),
+        Binding("c", "commit_entries", "Commit"),
+        Binding("question_mark", "show_help", "Help", key_display="?"),
         Binding("enter", "diff_entry", "Diff"),
         Binding("d", "diff_entry", "Diff"),
         Binding("j", "cursor_down", "Down", show=False),
@@ -373,8 +623,13 @@ class SvnTui(App[None]):
         self.status_theme = DEFAULT_THEME
         self.preview_task: asyncio.Task[None] | None = None
         self.preview_debounce_task: asyncio.Task[None] | None = None
+        self.preview_index_task: asyncio.Task[None] | None = None
+        self.preview_lock = asyncio.Lock()
+        self.preview_cancel_token: PreviewCancelToken | None = None
         self.preview_request_id = 0
         self.preview_document: PreviewDocument | None = None
+        self.status_request_id = 0
+        self.path_scroll_offset = 0
         self.waiting_for_second_g = False
 
     def compose(self) -> ComposeResult:
@@ -392,19 +647,30 @@ class SvnTui(App[None]):
     async def on_mount(self) -> None:
         self.title = "svn-tui"
         self.sub_title = str(self.client.target)
+        self.set_interval(PATH_SCROLL_SECONDS, self.tick_path_scroll)
         await self.load_status()
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         row = event.item
         if isinstance(row, StatusRow):
+            self.path_scroll_offset = 0
+            self.refresh_status_rows()
             self.update_detail(row)
             self.schedule_preview(row.entry)
+
+    def on_resize(self, event: object) -> None:
+        del event
+        self.refresh_status_layout()
 
     def on_unmount(self) -> None:
         if self.preview_debounce_task is not None:
             self.preview_debounce_task.cancel()
         if self.preview_task is not None:
             self.preview_task.cancel()
+        if self.preview_index_task is not None:
+            self.preview_index_task.cancel()
+        if self.preview_cancel_token is not None:
+            self.preview_cancel_token.cancel()
 
     async def action_refresh_status(self) -> None:
         await self.load_status()
@@ -415,7 +681,45 @@ class SvnTui(App[None]):
         if row is None:
             return
         row.toggle_selected()
+        self.refresh_status_rows()
         self.update_detail(row)
+
+    def action_commit_entries(self) -> None:
+        self.waiting_for_second_g = False
+        selected = self.selected_rows()
+        if not selected:
+            self.notify(
+                "Select files with Space before committing.",
+                title="nothing selected",
+                severity="warning",
+            )
+            return
+
+        self.push_screen(
+            CommitMessageDialog(len(selected)),
+            lambda message: self.handle_commit_message(selected, message),
+        )
+
+    def handle_commit_message(
+        self,
+        rows: list[StatusRow],
+        message: str | None,
+    ) -> None:
+        if message is None:
+            return
+        if not message.strip():
+            self.notify(
+                "Commit message cannot be empty.",
+                title="commit cancelled",
+                severity="warning",
+            )
+            return
+
+        asyncio.create_task(self.commit_rows(rows, message.strip()))
+
+    def action_show_help(self) -> None:
+        self.waiting_for_second_g = False
+        self.push_screen(HelpDialog())
 
     def action_diff_entry(self) -> None:
         self.waiting_for_second_g = False
@@ -500,9 +804,44 @@ class SvnTui(App[None]):
                 return indexed
         return None
 
-    async def load_status(self) -> None:
+    def selected_rows(self) -> list[StatusRow]:
+        return [
+            row
+            for row in self.list_view.children
+            if isinstance(row, StatusRow) and row.selected_for_commit
+        ]
+
+    async def commit_rows(self, rows: list[StatusRow], message: str) -> None:
+        paths = [row.entry.path for row in rows]
+        self.detail.update(Text(f"Committing {len(paths)} file(s)...", style="dim"))
         try:
-            self.entries = self.client.status()
+            output = await self.client.commit(message, paths)
+        except FileNotFoundError as exc:
+            self.notify(
+                f"command not found: {exc.filename}",
+                title="command failed",
+                severity="error",
+            )
+            self.update_detail(self.current_row())
+            return
+        except subprocess.CalledProcessError as exc:
+            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.notify(message_text, title="svn commit failed", severity="error")
+            self.update_detail(self.current_row())
+            return
+        except asyncio.CancelledError:
+            return
+
+        commit_message = commit_success_message(output, len(paths))
+        self.notify(commit_message, title="commit finished")
+        await self.load_status()
+
+    async def load_status(self) -> None:
+        self.status_request_id += 1
+        request_id = self.status_request_id
+        self.detail.update(Text("Loading svn status...", style="dim"))
+        try:
+            entries = await self.client.status()
         except FileNotFoundError as exc:
             self.notify(
                 f"command not found: {exc.filename}",
@@ -514,10 +853,18 @@ class SvnTui(App[None]):
             message = exc.stderr.strip() if exc.stderr else str(exc)
             self.notify(message, title="svn failed", severity="error")
             return
+        except asyncio.CancelledError:
+            return
+
+        if request_id != self.status_request_id:
+            return
+
+        self.entries = entries
 
         await self.list_view.clear()
         if not self.entries:
             await self.list_view.append(ListItem(Label("Working copy is clean")))
+            self.refresh_status_layout()
             self.detail.update(self.format_detail())
             self.preview_document = None
             self.preview.set_message(Text("No changed file selected.", style="dim"))
@@ -528,10 +875,46 @@ class SvnTui(App[None]):
             )
             self.list_view.index = 0
             self.list_view.focus()
+            self.refresh_status_layout()
             row = self.current_row()
             if row is not None:
                 self.update_detail(row)
                 self.schedule_preview(row.entry)
+
+    def status_row_width(self) -> int:
+        return max(self.list_view.size.width, self.status_header.size.width, 80)
+
+    def refresh_status_layout(self) -> None:
+        row_width = self.status_row_width()
+        self.status_header.update(format_status_header(row_width))
+        self.refresh_status_rows(row_width)
+
+    def refresh_status_rows(self, row_width: int | None = None) -> None:
+        width = row_width if row_width is not None else self.status_row_width()
+        current = self.current_row()
+        for child in self.list_view.children:
+            if isinstance(child, StatusRow):
+                is_highlighted = child is current
+                child.refresh_label(
+                    width,
+                    is_highlighted,
+                    self.path_scroll_offset if is_highlighted else 0,
+                )
+
+    def tick_path_scroll(self) -> None:
+        row = self.current_row()
+        if row is None:
+            return
+        row_width = self.status_row_width()
+        if not row.path_needs_scroll(row_width):
+            if self.path_scroll_offset != 0:
+                self.path_scroll_offset = 0
+                row.refresh_label(row_width, True, self.path_scroll_offset)
+            return
+        path_text = str(relative_path(row.entry.path, row.root))
+        cycle_width = len(path_text) + len(PATH_SCROLL_SEPARATOR)
+        self.path_scroll_offset = (self.path_scroll_offset + 1) % cycle_width
+        row.refresh_label(row_width, True, self.path_scroll_offset)
 
     def schedule_preview(self, entry: SvnStatusEntry) -> None:
         if not PREVIEW_ENABLED:
@@ -541,9 +924,8 @@ class SvnTui(App[None]):
         request_id = self.preview_request_id
         if self.preview_debounce_task is not None:
             self.preview_debounce_task.cancel()
-        if self.preview_task is not None:
-            self.preview_task.cancel()
-            self.preview_task = None
+        if self.preview_cancel_token is not None:
+            self.preview_cancel_token.cancel()
         self.preview_document = None
         self.preview.set_message(Text("Loading preview...", style="dim"))
         self.preview_debounce_task = asyncio.create_task(
@@ -570,30 +952,63 @@ class SvnTui(App[None]):
         entry: SvnStatusEntry,
         request_id: int,
     ) -> None:
+        token = PreviewCancelToken()
         try:
-            document = await asyncio.to_thread(
-                build_preview_document,
-                entry,
-            )
+            async with self.preview_lock:
+                if request_id != self.preview_request_id:
+                    return
+                self.preview_cancel_token = token
+                document = await asyncio.to_thread(
+                    build_preview_document,
+                    entry,
+                    token,
+                )
         except asyncio.CancelledError:
+            token.cancel()
             return
         if request_id == self.preview_request_id:
+            if isinstance(document, PreviewCancelled):
+                return
             if isinstance(document, Text):
                 self.preview_document = None
                 self.preview.set_message(document)
                 return
             self.preview_document = document
             self.preview.set_document(document)
+            if document.continue_indexing:
+                self.preview_index_task = asyncio.create_task(
+                    self.continue_preview_index(document, token, request_id)
+                )
+
+    async def continue_preview_index(
+        self,
+        document: PreviewDocument,
+        token: PreviewCancelToken,
+        request_id: int,
+    ) -> None:
+        try:
+            async with self.preview_lock:
+                if request_id != self.preview_request_id or token.cancelled:
+                    return
+                result = await asyncio.to_thread(
+                    continue_preview_document_index,
+                    document,
+                    token,
+                )
+        except asyncio.CancelledError:
+            token.cancel()
+            return
+        if request_id != self.preview_request_id or token.cancelled:
+            return
+        if isinstance(result, PreviewCancelled):
+            return
+        self.preview.set_document(document, reset_scroll=False)
 
     def update_detail(self, row: StatusRow | None = None) -> None:
         self.detail.update(self.format_detail(row))
 
     def format_detail(self, row: StatusRow | None = None) -> Text:
-        selected = [
-            row
-            for row in self.list_view.children
-            if isinstance(row, StatusRow) and row.selected_for_commit
-        ]
+        selected = self.selected_rows()
         detail = Text()
         detail.append(f"Changed: {len(self.entries)}  ")
         detail.append(f"Commit list: {len(selected)}\n")
@@ -614,10 +1029,6 @@ class SvnTui(App[None]):
             )
             detail.append(f"  Full: {row.entry.path}\n")
 
-        detail.append(
-            "Space: check/uncheck  Enter/d: nvim diff  j/k: move  "
-            "gg/G: top/bottom  Ctrl-e/y/d/u: preview  Shift-left/right: preview x  r: refresh"
-        )
         return detail
 
 
@@ -660,7 +1071,11 @@ def format_status_row(
     shown_path: Path,
     marker: str,
     theme: StatusTheme,
+    row_width: int = 0,
+    is_highlighted: bool = False,
+    path_scroll_offset: int = 0,
 ) -> Text:
+    path_width = path_column_width(row_width)
     row = Text()
     check = Text()
     check.append("[", style="dim")
@@ -668,27 +1083,113 @@ def format_status_row(
     check.append("]", style="dim")
     check.append(" " * (CHECK_COLUMN_WIDTH - len(check.plain)))
     row.append_text(check)
-    row.append(f"{entry.raw_status:<8}", style=status_style(entry, theme))
+    row.append(f"{entry.raw_status:<{STATUS_COLUMN_WIDTH}}", style=status_style(entry, theme))
+    row.append(" ")
+    row.append(
+        fit_path_label(str(shown_path), path_width, is_highlighted, path_scroll_offset),
+        style=file_type_style(entry.path, theme),
+    )
     row.append(" ")
     row.append(f"{file_extension(entry.path):<{EXTENSION_COLUMN_WIDTH}}", style="cyan")
     row.append(" ")
     row.append(f"{file_size_label(entry.path):>{SIZE_COLUMN_WIDTH}}", style="dim")
-    row.append(" ")
-    row.append(str(shown_path), style=file_type_style(entry.path, theme))
     return row
 
 
-def format_status_header() -> Text:
+def format_status_header(row_width: int = 0) -> Text:
+    path_width = path_column_width(row_width)
     header = Text()
     header.append(f"{'Check':<{CHECK_COLUMN_WIDTH}}", style="bold")
-    header.append(f"{'Status':<8}", style="bold")
+    header.append(f"{'Status':<{STATUS_COLUMN_WIDTH}}", style="bold")
+    header.append(" ")
+    header.append(f"{'Path':<{path_width}}", style="bold")
     header.append(" ")
     header.append(f"{'Extension':<{EXTENSION_COLUMN_WIDTH}}", style="bold")
     header.append(" ")
     header.append(f"{'Size':>{SIZE_COLUMN_WIDTH}}", style="bold")
-    header.append(" ")
-    header.append("Path", style="bold")
     return header
+
+
+def path_column_width(row_width: int) -> int:
+    fixed_width = (
+        CHECK_COLUMN_WIDTH
+        + STATUS_COLUMN_WIDTH
+        + EXTENSION_COLUMN_WIDTH
+        + SIZE_COLUMN_WIDTH
+        + 3
+    )
+    if row_width <= fixed_width:
+        return PATH_COLUMN_MIN_WIDTH
+    return max(PATH_COLUMN_MIN_WIDTH, row_width - fixed_width)
+
+
+def fit_path_label(
+    path_text: str,
+    width: int,
+    is_highlighted: bool,
+    scroll_offset: int,
+) -> str:
+    if width <= 0:
+        return ""
+    if len(path_text) <= width:
+        return f"{path_text:<{width}}"
+    if is_highlighted:
+        return scroll_path_label(path_text, width, scroll_offset)
+    return middle_truncate(path_text, width)
+
+
+def middle_truncate(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return f"{value:<{width}}"
+    marker = "..."
+    if width <= len(marker):
+        return value[:width]
+    remaining = width - len(marker)
+    head_width = (remaining + 1) // 2
+    tail_width = remaining - head_width
+    return value[:head_width] + marker + value[-tail_width:]
+
+
+def scroll_path_label(path_text: str, width: int, scroll_offset: int) -> str:
+    if width <= 0:
+        return ""
+    cycle = path_text + PATH_SCROLL_SEPARATOR
+    offset = scroll_offset % len(cycle)
+    visible = (cycle + cycle)[offset : offset + width]
+    return f"{visible:<{width}}"
+
+
+def commit_success_message(output: str, file_count: int) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if lines:
+        return lines[-1]
+    return f"Committed {file_count} file(s)."
+
+
+def format_help_text() -> Text:
+    help_text = Text()
+    shortcuts = [
+        ("?", "Open this help dialog"),
+        ("Esc", "Close dialogs"),
+        ("q", "Quit"),
+        ("r", "Refresh SVN status"),
+        ("Space", "Check or uncheck the current entry"),
+        ("c", "Open commit message dialog for checked entries"),
+        ("Ctrl+Enter", "Commit from the commit message dialog"),
+        ("Enter / d", "Open the current entry in nvim diff"),
+        ("j / k", "Move selection down or up"),
+        ("Ctrl+f / Ctrl+b", "Page the status list down or up"),
+        ("gg / G", "Jump to top or bottom of the status list"),
+        ("Ctrl+e / Ctrl+y", "Scroll preview down or up one line"),
+        ("Ctrl+d / Ctrl+u", "Scroll preview down or up half a page"),
+        ("Shift+Right / Shift+Left", "Scroll preview horizontally"),
+    ]
+    for key, description in shortcuts:
+        help_text.append(f"{key:<24}", style="bold cyan")
+        help_text.append(f"{description}\n")
+    return help_text
 
 
 def status_style(entry: SvnStatusEntry, theme: StatusTheme) -> str:
@@ -713,7 +1214,7 @@ def file_extension(path: Path) -> str:
     suffix = path.suffix
     if not suffix:
         return "-"
-    return suffix[1:]
+    return suffix
 
 
 def file_size_label(path: Path) -> str:
@@ -723,7 +1224,10 @@ def file_size_label(path: Path) -> str:
         size = path.stat().st_size
     except OSError:
         return "-"
+    return format_byte_size(size)
 
+
+def format_byte_size(size: int) -> str:
     one_mib = 1024 * 1024
     one_gib = 1024 * one_mib
     if size < one_mib:
@@ -738,44 +1242,162 @@ def format_size(value: float, unit: str) -> str:
     return f"{number}{unit}"
 
 
-def build_preview_document(entry: SvnStatusEntry) -> PreviewDocument | Text:
+def build_preview_document(
+    entry: SvnStatusEntry,
+    cancel_token: PreviewCancelToken,
+) -> PreviewDocument | Text | PreviewCancelled:
     path = entry.path
     if path.is_dir():
         return Text(f"{path} is a directory.", style="dim")
     if not path.exists():
         return Text(f"{path} does not exist in the working copy.", style="yellow")
 
-    line_offsets: list[int] = []
     try:
-        with path.open("rb") as file:
-            while True:
-                offset = file.tell()
-                line = file.readline(PREVIEW_MAX_LINE_BYTES + 1)
-                if line == b"":
-                    break
-                if b"\0" in line:
-                    return Text(
-                        f"{path} looks like a binary file. Preview is unavailable.",
-                        style="yellow",
-                    )
-                line_offsets.append(offset)
-                if len(line) > PREVIEW_MAX_LINE_BYTES:
-                    drain_line(file)
+        file_size = path.stat().st_size
     except OSError as exc:
         return Text(f"Unable to read {path}: {exc}", style="red")
+
+    max_lines = (
+        None
+        if file_size <= PREVIEW_FULL_INDEX_MAX_BYTES
+        else PREVIEW_INITIAL_INDEX_LINES
+    )
+    scan = scan_preview_offsets(path, cancel_token, max_lines=max_lines)
+    if isinstance(scan, PreviewCancelled):
+        return scan
+    if isinstance(scan, Text):
+        return scan
+    if scan.status_message is not None:
+        return Text(
+            f"{path} looks like a binary file. Preview is unavailable.",
+            style="yellow",
+        )
 
     try:
         lexer = Syntax.guess_lexer(str(path), code="")
     except Exception:
         lexer = "text"
 
-    return PreviewDocument(path=path, line_offsets=line_offsets, lexer=lexer)
+    continue_indexing = (
+        not scan.complete
+        and file_size <= PREVIEW_BACKGROUND_INDEX_MAX_BYTES
+    )
+    status_message = preview_index_status_message(
+        file_size=file_size,
+        indexed_lines=len(scan.offsets),
+        continue_indexing=continue_indexing,
+        complete=scan.complete,
+    )
+
+    return PreviewDocument(
+        path=path,
+        line_offsets=scan.offsets,
+        lexer=lexer,
+        file_size=file_size,
+        next_offset=scan.next_offset,
+        indexed_complete=scan.complete,
+        continue_indexing=continue_indexing,
+        status_message=status_message,
+    )
+
+
+def continue_preview_document_index(
+    document: PreviewDocument,
+    cancel_token: PreviewCancelToken,
+) -> PreviewDocument | PreviewCancelled:
+    scan = scan_preview_offsets(
+        document.path,
+        cancel_token,
+        start_offset=document.next_offset,
+    )
+    if isinstance(scan, PreviewCancelled):
+        return scan
+    if isinstance(scan, Text):
+        document.apply_index_result(
+            [],
+            document.next_offset,
+            True,
+            f"Preview indexing stopped: {scan.plain}",
+        )
+        return document
+
+    document.apply_index_result(
+        scan.offsets,
+        scan.next_offset,
+        scan.complete,
+        scan.status_message,
+    )
+    return document
+
+
+def scan_preview_offsets(
+    path: Path,
+    cancel_token: PreviewCancelToken,
+    *,
+    start_offset: int = 0,
+    max_lines: int | None = None,
+) -> PreviewIndexScan | Text | PreviewCancelled:
+    offsets: list[int] = []
+    try:
+        with path.open("rb") as file:
+            file.seek(start_offset)
+            while max_lines is None or len(offsets) < max_lines:
+                if cancel_token.cancelled:
+                    return PreviewCancelled()
+                offset = file.tell()
+                line = file.readline(PREVIEW_MAX_LINE_BYTES + 1)
+                if line == b"":
+                    return PreviewIndexScan(offsets, file.tell(), True)
+                if b"\0" in line:
+                    return PreviewIndexScan(
+                        offsets,
+                        file.tell(),
+                        True,
+                        "Binary data found after the indexed prefix. Preview stopped.",
+                    )
+                offsets.append(offset)
+                if len(line) > PREVIEW_MAX_LINE_BYTES and not drain_line(
+                    file,
+                    cancel_token,
+                ):
+                    return PreviewCancelled()
+            return PreviewIndexScan(offsets, file.tell(), False)
+    except OSError as exc:
+        return Text(f"Unable to read {path}: {exc}", style="red")
+
+
+def preview_index_status_message(
+    *,
+    file_size: int,
+    indexed_lines: int,
+    continue_indexing: bool,
+    complete: bool,
+) -> str | None:
+    if complete:
+        return None
+    size = format_byte_size(file_size)
+    if continue_indexing:
+        return (
+            f"Showing first {indexed_lines} lines of {size}; "
+            "indexing the rest in background."
+        )
+    return (
+        f"Showing first {indexed_lines} lines of {size}; "
+        "full indexing is skipped for large files."
+    )
 
 
 def read_preview_line(document: PreviewDocument, index: int) -> str:
-    with document.path.open("rb") as file:
-        file.seek(document.line_offsets[index])
-        raw_line = file.readline(PREVIEW_MAX_LINE_BYTES + 1)
+    offset = document.line_offset_at(index)
+    if offset is None:
+        return document.status_message or ""
+
+    try:
+        with document.path.open("rb") as file:
+            file.seek(offset)
+            raw_line = file.readline(PREVIEW_MAX_LINE_BYTES + 1)
+    except OSError as exc:
+        return f"Unable to read line: {exc}"
 
     truncated = len(raw_line) > PREVIEW_MAX_LINE_BYTES
     if truncated:
@@ -788,11 +1410,13 @@ def read_preview_line(document: PreviewDocument, index: int) -> str:
     return line
 
 
-def drain_line(file: object) -> None:
+def drain_line(file: object, cancel_token: PreviewCancelToken) -> bool:
     while True:
+        if cancel_token.cancelled:
+            return False
         chunk = file.readline(PREVIEW_MAX_LINE_BYTES)
         if chunk == b"" or chunk.endswith(b"\n"):
-            return
+            return True
 
 
 def parse_args() -> argparse.Namespace:
