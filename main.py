@@ -270,6 +270,7 @@ class StatusRow(ListItem):
         self.label = Label()
         self.row_width = 0
         self.is_highlighted = False
+        self.is_in_visual_range = False
         self.path_scroll_offset = 0
 
     def compose(self) -> ComposeResult:
@@ -286,12 +287,15 @@ class StatusRow(ListItem):
         self,
         row_width: int | None = None,
         is_highlighted: bool | None = None,
+        is_in_visual_range: bool | None = None,
         path_scroll_offset: int | None = None,
     ) -> None:
         if row_width is not None:
             self.row_width = row_width
         if is_highlighted is not None:
             self.is_highlighted = is_highlighted
+        if is_in_visual_range is not None:
+            self.is_in_visual_range = is_in_visual_range
         if path_scroll_offset is not None:
             self.path_scroll_offset = path_scroll_offset
         marker = (
@@ -308,6 +312,7 @@ class StatusRow(ListItem):
                 self.theme,
                 self.row_width,
                 self.is_highlighted,
+                self.is_in_visual_range,
                 self.path_scroll_offset,
             )
         )
@@ -594,6 +599,8 @@ class SvnTui(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh_status", "Refresh"),
         Binding("space", "toggle_entry", "Stage"),
+        Binding("v", "visual_select", "Visual"),
+        Binding("escape", "exit_visual_select", "Exit visual", show=False),
         Binding("c", "commit_entries", "Commit"),
         Binding("question_mark", "show_help", "Help", key_display="?"),
         Binding("enter", "diff_entry", "Diff"),
@@ -630,6 +637,7 @@ class SvnTui(App[None]):
         self.preview_document: PreviewDocument | None = None
         self.status_request_id = 0
         self.path_scroll_offset = 0
+        self.visual_anchor_index: int | None = None
         self.waiting_for_second_g = False
 
     def compose(self) -> ComposeResult:
@@ -677,12 +685,38 @@ class SvnTui(App[None]):
 
     def action_toggle_entry(self) -> None:
         self.waiting_for_second_g = False
+        if self.visual_anchor_index is not None:
+            rows = self.visual_rows()
+            if not rows:
+                return
+            for row in rows:
+                row.toggle_selected()
+            self.refresh_status_rows()
+            self.update_detail(self.current_row())
+            return
+
         row = self.current_row()
         if row is None:
             return
         row.toggle_selected()
         self.refresh_status_rows()
         self.update_detail(row)
+
+    def action_visual_select(self) -> None:
+        self.waiting_for_second_g = False
+        index = self.current_index()
+        if index is None:
+            return
+        self.visual_anchor_index = index
+        self.refresh_status_rows()
+        self.update_detail(self.current_row())
+
+    def action_exit_visual_select(self) -> None:
+        if self.visual_anchor_index is None:
+            return
+        self.visual_anchor_index = None
+        self.refresh_status_rows()
+        self.update_detail(self.current_row())
 
     def action_commit_entries(self) -> None:
         self.waiting_for_second_g = False
@@ -732,18 +766,30 @@ class SvnTui(App[None]):
     def action_cursor_down(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_cursor_down()
+        if self.visual_anchor_index is not None:
+            self.refresh_status_rows()
+            self.update_detail(self.current_row())
 
     def action_cursor_up(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_cursor_up()
+        if self.visual_anchor_index is not None:
+            self.refresh_status_rows()
+            self.update_detail(self.current_row())
 
     def action_page_down(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_page_down()
+        if self.visual_anchor_index is not None:
+            self.refresh_status_rows()
+            self.update_detail(self.current_row())
 
     def action_page_up(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_page_up()
+        if self.visual_anchor_index is not None:
+            self.refresh_status_rows()
+            self.update_detail(self.current_row())
 
     def action_preview_scroll_down(self) -> None:
         self.preview.scroll_relative(y=1, animate=False, immediate=True)
@@ -783,6 +829,9 @@ class SvnTui(App[None]):
         self.waiting_for_second_g = False
         if self.list_view.children:
             self.list_view.index = len(self.list_view.children) - 1
+            if self.visual_anchor_index is not None:
+                self.refresh_status_rows()
+                self.update_detail(self.current_row())
 
     def clear_pending_vim_prefix(self) -> None:
         self.waiting_for_second_g = False
@@ -790,6 +839,9 @@ class SvnTui(App[None]):
     def move_to_top(self) -> None:
         if self.list_view.children:
             self.list_view.index = 0
+            if self.visual_anchor_index is not None:
+                self.refresh_status_rows()
+                self.update_detail(self.current_row())
 
     def current_row(self) -> StatusRow | None:
         highlighted = self.list_view.highlighted_child
@@ -803,6 +855,36 @@ class SvnTui(App[None]):
             if isinstance(indexed, StatusRow):
                 return indexed
         return None
+
+    def current_index(self) -> int | None:
+        if self.list_view.index is None:
+            return None
+        if self.list_view.index >= len(self.list_view.children):
+            return None
+        if isinstance(self.list_view.children[self.list_view.index], StatusRow):
+            return self.list_view.index
+        return None
+
+    def visual_range(self) -> tuple[int, int] | None:
+        if self.visual_anchor_index is None:
+            return None
+        current_index = self.current_index()
+        if current_index is None:
+            return None
+        start = min(self.visual_anchor_index, current_index)
+        end = max(self.visual_anchor_index, current_index)
+        return start, end
+
+    def visual_rows(self) -> list[StatusRow]:
+        visual_range = self.visual_range()
+        if visual_range is None:
+            return []
+        start, end = visual_range
+        return [
+            row
+            for row in self.list_view.children[start : end + 1]
+            if isinstance(row, StatusRow)
+        ]
 
     def selected_rows(self) -> list[StatusRow]:
         return [
@@ -860,6 +942,7 @@ class SvnTui(App[None]):
             return
 
         self.entries = entries
+        self.visual_anchor_index = None
 
         await self.list_view.clear()
         if not self.entries:
@@ -892,12 +975,17 @@ class SvnTui(App[None]):
     def refresh_status_rows(self, row_width: int | None = None) -> None:
         width = row_width if row_width is not None else self.status_row_width()
         current = self.current_row()
-        for child in self.list_view.children:
+        visual_range = self.visual_range()
+        for child_index, child in enumerate(self.list_view.children):
             if isinstance(child, StatusRow):
                 is_highlighted = child is current
+                is_in_visual_range = False
+                if visual_range is not None:
+                    is_in_visual_range = visual_range[0] <= child_index <= visual_range[1]
                 child.refresh_label(
                     width,
                     is_highlighted,
+                    is_in_visual_range,
                     self.path_scroll_offset if is_highlighted else 0,
                 )
 
@@ -909,12 +997,22 @@ class SvnTui(App[None]):
         if not row.path_needs_scroll(row_width):
             if self.path_scroll_offset != 0:
                 self.path_scroll_offset = 0
-                row.refresh_label(row_width, True, self.path_scroll_offset)
+                row.refresh_label(
+                    row_width,
+                    True,
+                    row.is_in_visual_range,
+                    self.path_scroll_offset,
+                )
             return
         path_text = str(relative_path(row.entry.path, row.root))
         cycle_width = len(path_text) + len(PATH_SCROLL_SEPARATOR)
         self.path_scroll_offset = (self.path_scroll_offset + 1) % cycle_width
-        row.refresh_label(row_width, True, self.path_scroll_offset)
+        row.refresh_label(
+            row_width,
+            True,
+            row.is_in_visual_range,
+            self.path_scroll_offset,
+        )
 
     def schedule_preview(self, entry: SvnStatusEntry) -> None:
         if not PREVIEW_ENABLED:
@@ -1012,6 +1110,12 @@ class SvnTui(App[None]):
         detail = Text()
         detail.append(f"Changed: {len(self.entries)}  ")
         detail.append(f"Commit list: {len(selected)}\n")
+        if self.visual_anchor_index is not None:
+            detail.append(
+                f"Visual range: {len(self.visual_rows())}  "
+                "Space inverts range, Esc exits\n",
+                style="bold cyan",
+            )
         detail.append(f"Path root: {self.client.display_root}\n")
         detail.append(f"SVN root: {self.client.root}\n")
 
@@ -1073,6 +1177,7 @@ def format_status_row(
     theme: StatusTheme,
     row_width: int = 0,
     is_highlighted: bool = False,
+    is_in_visual_range: bool = False,
     path_scroll_offset: int = 0,
 ) -> Text:
     path_width = path_column_width(row_width)
@@ -1093,6 +1198,8 @@ def format_status_row(
     row.append(f"{file_extension(entry.path):<{EXTENSION_COLUMN_WIDTH}}", style="cyan")
     row.append(" ")
     row.append(f"{file_size_label(entry.path):>{SIZE_COLUMN_WIDTH}}", style="dim")
+    if is_in_visual_range:
+        row.stylize("reverse")
     return row
 
 
@@ -1172,10 +1279,12 @@ def format_help_text() -> Text:
     help_text = Text()
     shortcuts = [
         ("?", "Open this help dialog"),
-        ("Esc", "Close dialogs"),
+        ("Esc", "Close dialogs or exit visual select mode"),
         ("q", "Quit"),
         ("r", "Refresh SVN status"),
         ("Space", "Check or uncheck the current entry"),
+        ("v", "Enter visual select mode at the current entry"),
+        ("Space in visual", "Invert checked state for every entry in the range"),
         ("c", "Open commit message dialog for checked entries"),
         ("Ctrl+Enter", "Commit from the commit message dialog"),
         ("Enter / d", "Open the current entry in nvim diff"),
