@@ -47,6 +47,8 @@ LOG_AUTHOR_WIDTH = 14
 LOG_DATE_WIDTH = 16
 LOG_ACTION_WIDTH = 4
 LOG_KIND_WIDTH = 4
+LOG_ACTION_MENU_WIDTH = 24
+LOG_COPY_MENU_WIDTH = 18
 
 
 @dataclass(frozen=True)
@@ -895,15 +897,22 @@ class LogScreen(Screen[None]):
 
     def position_copy_menu(self) -> None:
         x, y = self.log_menu_anchor()
-        action_menu_width = 24
-        copy_x = min(self.size.width - 18, x + action_menu_width)
+        copy_x = min(self.size.width - LOG_COPY_MENU_WIDTH, x + LOG_ACTION_MENU_WIDTH)
         self.copy_menu.styles.offset = (copy_x, y)
 
     def log_menu_anchor(self) -> tuple[int, int]:
-        row_index = self.log_list.index or 0
-        visible_y = max(0, row_index - int(self.log_list.scroll_y))
-        x = min(self.size.width - 26, self.log_list.region.x + 16)
-        y = min(self.size.height - 6, self.log_list.region.y + visible_y)
+        row = self.current_log_row()
+        if row is not None and row.size.width:
+            row_right = row.region.x + row.size.width
+            row_top = row.region.y
+        else:
+            row_index = self.log_list.index or 0
+            visible_y = max(0, row_index - int(self.log_list.scroll_y))
+            row_right = self.log_list.region.x + self.log_list.size.width
+            row_top = self.log_list.region.y + visible_y
+
+        x = min(self.size.width - LOG_ACTION_MENU_WIDTH, row_right)
+        y = min(self.size.height - 6, row_top)
         return max(0, x), max(0, y)
 
     def current_overlay_item(self) -> OverlayMenuItem | None:
@@ -1371,6 +1380,7 @@ class SvnTui(App[None]):
 
     LogScreen {
         layout: vertical;
+        layers: base overlay;
     }
 
     #log-banner {

@@ -42,7 +42,7 @@ python main.py
 - 主界面按 `l` 打开最近日志全屏界面。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
 - 日志界面支持查看 revision 列表、提交说明、变更路径列表，以及单文件历史 diff 预览。
-- 日志界面支持在日志列表弹出操作菜单，并复制 revision / author / message 到剪贴板。
+- 日志界面支持在当前日志行右侧弹出操作菜单，并复制 revision / author / message 到剪贴板。
 - SVN 状态读取使用异步子进程，避免阻塞 TUI 主循环。
 - 预览使用 debounce，停止移动 200ms 后才加载。
 - 预览使用单后台任务、可取消索引和虚拟滚动。
@@ -100,7 +100,7 @@ python main.py
 
 ### Log Popup Menu
 
-日志列表按 `p` 后会弹出操作菜单：
+日志列表按 `p` 后会在当前日志行右侧弹出操作菜单：
 
 - `revert to this`
 - `revert changes from`
@@ -108,6 +108,7 @@ python main.py
 
 其中：
 
+- 操作菜单会显示在当前日志行右侧；`copy >` 子菜单会显示在操作菜单右侧。
 - `revert to this` 和 `revert changes from` 当前只展示触发提示，尚未真正执行 SVN 回退。
 - `copy >` 可进一步复制：
   - `revision`
