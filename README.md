@@ -1,8 +1,8 @@
 # svn-tui
 
-一个基于 [Textual](https://textual.textualize.io/) 的 SVN TUI 客户端原型。
+一个基于 [Textual](https://textual.textualize.io/) 的 SVN TUI 客户端原型，用于在终端里查看 SVN 工作副本状态、检查变更、提交文件，并浏览仓库最近日志。
 
-当前目标是快速查看指定工作副本路径下的 `svn st` 结果，逐个检查文件变更，用 `nvim -d` 打开 diff，并提交勾选的文件；同时可以直接查看仓库最近日志与对应 diff。
+当前目标是快速查看指定工作副本路径下的 `svn st` 结果，逐个检查文件变更，用 `nvim -d` 打开 diff，并提交勾选的文件；同时可以直接查看仓库最近日志与对应 diff。项目已拆分为可扩展的包结构，便于后续增加更多独立界面。
 
 ## Requirements
 
@@ -13,22 +13,57 @@
 安装 Python 依赖：
 
 ```bash
-python -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
-## Usage
+## Quick Start
 
 ```bash
-python main.py /path/to/svn/working-copy
+python3 main.py /path/to/svn/working-copy
 ```
 
 如果不传路径，默认使用当前目录：
 
 ```bash
-python main.py
+python3 main.py
 ```
 
 列表中的路径相对传入的打开路径显示。例如打开 `a/b/c` 时，文件 `a/b/c/d.py` 会显示为 `d.py`。
+
+## Documentation
+
+- [架构与业务链路](docs/architecture.md)
+- [开发与验证指南](docs/development.md)
+
+## Project Structure
+
+项目已按后续多界面扩展拆成包结构：
+
+- `main.py`：兼容入口，只调用包内 CLI。
+- `svn_tui/cli.py`：命令行参数解析和启动。
+- `svn_tui/app.py`：Textual App 外壳和全局快捷键。
+- `svn_tui/config.py`：预览、列表列宽、日志数量、滚动间隔、主题等全局配置。
+- `svn_tui/models.py`：SVN 状态、日志、日志路径等业务数据结构。
+- `svn_tui/services/`：SVN 命令调用和文件预览索引等工具层，不依赖具体界面。
+- `svn_tui/ui/styles.py`：Textual CSS 布局和样式。
+- `svn_tui/ui/widgets.py`：可复用 UI 组件和列表行渲染。
+- `svn_tui/ui/dialogs.py`：提交信息、帮助等弹窗。
+- `svn_tui/ui/screens/`：不同界面 Screen，目前包含状态界面和日志界面。
+- `svn_tui/ui/formatters.py`、`svn_tui/ui/search.py`：界面展示格式化和列表搜索逻辑。
+- `svn_tui/utils/`：路径、大小格式化等跨层小工具。
+
+新增界面时优先在 `svn_tui/ui/screens/` 添加 Screen，并复用 `services/`、`models.py`、`ui/widgets.py` 和 `ui/formatters.py`。样式只放在 `svn_tui/ui/styles.py`，配置只放在 `svn_tui/config.py`。
+
+## Business Flow
+
+主链路：
+
+1. CLI 解析目标工作副本路径，启动 `SvnTui`。
+2. App 进入 `StatusScreen`，通过 `SvnClient.status()` 异步执行 `svn st`。
+3. 状态列表将 `SvnStatusEntry` 渲染为可勾选行，右侧按当前行延迟加载只读预览。
+4. 用户勾选文件后输入提交说明，`SvnClient.commit()` 执行 `svn commit`，完成后刷新状态。
+5. 用户打开 diff / blame 时暂停 Textual，交给真实 `nvim` 处理交互。
+6. 用户进入 `LogScreen` 后，`SvnClient.recent_logs()` 读取仓库日志，选中 revision/path 后再异步加载 `svn diff`。
 
 ## Features
 
@@ -48,6 +83,7 @@ python main.py
 - 预览使用 debounce，停止移动 200ms 后才加载。
 - 预览使用单后台任务、可取消索引和虚拟滚动。
 - 大文件先显示前缀内容；中等文件会后台补全索引，超大文件跳过全量索引。
+- 列表列宽按终端 cell 宽度计算，中文路径和中文扩展名不会破坏后续列对齐。
 
 ## Shortcuts
 
@@ -166,3 +202,15 @@ nvim -d base-file working-file
 - 二进制文件不会预览。
 - 超长行会截断显示。
 - 日志变更路径列表中的 `Type` 使用 `F` / `D` 区分文件和目录。
+- 终端字体或环境如果对 East Asian Width 处理异常，中文列宽仍可能受终端自身渲染影响；应用侧使用 Rich cell 宽度计算做对齐。
+
+## Development
+
+常用验证命令：
+
+```bash
+python3 -m compileall main.py svn_tui
+python3 main.py --help
+```
+
+完整开发说明见 [开发与验证指南](docs/development.md)。
