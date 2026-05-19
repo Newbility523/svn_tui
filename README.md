@@ -42,6 +42,7 @@ python main.py
 - 主界面按 `l` 打开最近日志全屏界面。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
 - 日志界面支持查看 revision 列表、提交说明、变更路径列表，以及单文件历史 diff 预览。
+- 日志列表中的 revision 直接显示数字，不添加 `r` 前缀。
 - 日志界面支持在当前日志行右侧弹出操作菜单，并复制 revision / author / message 到剪贴板。
 - SVN 状态读取使用异步子进程，避免阻塞 TUI 主循环。
 - 预览使用 debounce，停止移动 200ms 后才加载。
@@ -49,6 +50,16 @@ python main.py
 - 大文件先显示前缀内容；中等文件会后台补全索引，超大文件跳过全量索引。
 
 ## Shortcuts
+
+底部 Footer 由 Textual 根据当前界面可用的 bindings 自动渲染。App 只保留真正全局的快捷键；Status 和 Log 界面分别声明自己的界面快捷键。
+
+### Global Shortcuts
+
+| Key | Action |
+| --- | --- |
+| `q` | 退出 |
+
+### Status Shortcuts
 
 | Key | Action |
 | --- | --- |
@@ -65,11 +76,12 @@ python main.py
 | `Enter` / `d` | 打开当前条目的 `nvim -d` |
 | `b` | 用只读 `nvim` 打开当前条目的 `svn blame` |
 | `l` | 打开最近日志界面 |
+| `/` | 显示并聚焦状态列表下方的搜索栏 |
+| `n` / `N` | 跳到下一个 / 上一个搜索匹配 |
 | `r` | 刷新 `svn st` |
 | `Ctrl-e` / `Ctrl-y` | 预览向下 / 向上滚动一行 |
 | `Ctrl-d` / `Ctrl-u` | 预览向下 / 向上滚动半页 |
 | `Shift-Right` / `Shift-Left` | 预览横向滚动 |
-| `q` | 退出 |
 
 ## Log View
 
@@ -90,6 +102,8 @@ python main.py
 | `Tab` | 在左上日志列表和左下变更路径列表之间切换焦点 |
 | `j` / `k` | 在当前聚焦列表中上下移动 |
 | `Ctrl-f` / `Ctrl-b` | 当前聚焦列表翻页 |
+| `/` | 显示并聚焦当前列表下方的搜索栏 |
+| `n` / `N` | 跳到下一个 / 上一个搜索匹配 |
 | `p` | 在日志列表当前项旁打开操作浮窗 |
 | `L` | 在浮窗的 `copy >` 项上进入右侧子菜单 |
 | `Enter` | 触发当前浮窗项；在 copy 子菜单中复制字段 |
@@ -114,6 +128,17 @@ python main.py
   - `revision`
   - `author`
   - `message`
+
+## Search
+
+Status 和 Log 界面的搜索栏嵌在列表下方，不使用弹窗。
+
+- 按 `/` 显示并聚焦当前列表的搜索栏。
+- 输入搜索词后按 `Enter` 跳到下一个匹配。
+- 当前聚焦列表会在底部显示浅色提示：`Searching: / to search`。
+- 搜索词非空时，底部会显示 `Searching: query [current/total] Jump by n/N`。
+- `Jump by n/N` 用加粗样式提示后续跳转方式。
+- `n` / `N` 只按当前聚焦列表的搜索词继续向下 / 向上跳转。
 
 ## Preview
 

@@ -22,7 +22,7 @@ from textual.geometry import Size
 from textual.scroll_view import ScrollView
 from textual.screen import ModalScreen, Screen
 from textual.strip import Strip
-from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Static, TextArea
+from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static, TextArea
 
 
 PREVIEW_ENABLED = True
@@ -710,6 +710,9 @@ class LogScreen(Screen[None]):
         Binding("p", "open_log_action_menu", "Popup"),
         Binding("L", "enter_submenu", "Submenu", show=False),
         Binding("enter", "activate_current", "Select"),
+        Binding("slash", "search", "Search", key_display="/"),
+        Binding("n", "search_next", "Next", show=False),
+        Binding("N", "search_previous", "Previous", show=False),
         Binding("escape", "dismiss_overlay", "Close", show=False),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
@@ -728,9 +731,13 @@ class LogScreen(Screen[None]):
         self.client = client
         self.log_list_header = Static(id="log-list-header")
         self.log_list = ListView(id="log-list")
+        self.log_search_label = Static(id="log-search-label")
+        self.log_search = Input(id="log-search", compact=True)
         self.log_message = Static(id="log-message")
         self.file_list_header = Static(id="log-file-list-header")
         self.file_list = ListView(id="log-file-list")
+        self.file_search_label = Static(id="log-file-search-label")
+        self.file_search = Input(id="log-file-search", compact=True)
         self.action_menu = ListView(
             OverlayMenuItem("revert_to_this", "revert to this"),
             OverlayMenuItem("revert_changes_from", "revert changes from"),
@@ -753,6 +760,11 @@ class LogScreen(Screen[None]):
         self.copy_menu_reopen_locked = False
         self.load_logs_task: asyncio.Task[None] | None = None
         self.diff_task: asyncio.Task[None] | None = None
+        self.log_search_query = ""
+        self.file_search_query = ""
+        self.log_search_match: tuple[int, int] | None = None
+        self.file_search_match: tuple[int, int] | None = None
+        self.search_list: ListView | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -765,6 +777,8 @@ class LogScreen(Screen[None]):
                     yield Static("Recent Logs", classes="log-pane-title")
                     yield self.log_list_header
                     yield self.log_list
+                    yield self.log_search_label
+                    yield self.log_search
                 with Vertical(classes="log-pane", id="log-message-pane"):
                     yield Static("Message", classes="log-pane-title")
                     yield self.log_message
@@ -772,6 +786,8 @@ class LogScreen(Screen[None]):
                     yield Static("Changed Files", classes="log-pane-title")
                     yield self.file_list_header
                     yield self.file_list
+                    yield self.file_search_label
+                    yield self.file_search
             with Vertical(classes="log-pane", id="log-right"):
                 yield self.preview_title
                 yield self.preview
@@ -788,6 +804,9 @@ class LogScreen(Screen[None]):
         self.log_message.update(Text("Loading log message...", style="dim"))
         self.action_menu.display = False
         self.copy_menu.display = False
+        self.log_search.display = False
+        self.file_search.display = False
+        self.refresh_search_lines()
         self.load_logs_task = asyncio.create_task(self.load_logs())
 
     def on_resize(self, event: object) -> None:
@@ -877,6 +896,121 @@ class LogScreen(Screen[None]):
             return
         self.hide_overlay_menus()
         self.log_list.focus()
+
+    def action_search(self) -> None:
+        if self.active_overlay is not None:
+            return
+        list_view = self.file_list if self.file_list.has_focus else self.log_list
+        search_input = self.search_input_for_list(list_view)
+        search_label = self.search_label_for_list(list_view)
+        search_label.display = False
+        search_input.value = self.search_query_for_list(list_view)
+        search_input.display = True
+        search_input.focus()
+        search_input.cursor_position = len(search_input.value)
+
+    def action_search_next(self) -> None:
+        self.jump_to_search_match(self.focused_list(), 1)
+
+    def action_search_previous(self) -> None:
+        self.jump_to_search_match(self.focused_list(), -1)
+
+    def jump_to_search_match(self, list_view: ListView, direction: int) -> None:
+        search_query = self.search_query_for_list(list_view)
+        if not search_query:
+            self.notify("Start a search with / first.", title="search", severity="warning")
+            return
+        index = find_list_match(list_view, search_query, direction, log_row_search_text)
+        if index is None:
+            self.notify(f"No match: {search_query}", title="search", severity="warning")
+            self.set_search_match(list_view, None)
+            list_view.focus()
+            self.refresh_search_lines(force=True)
+            return
+        list_view.index = index
+        self.set_search_match(list_view, list_match_position(list_view, search_query, index, log_row_search_text))
+        list_view.focus()
+        self.refresh_search_lines(force=True)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is not self.log_search and event.input is not self.file_search:
+            return
+        event.stop()
+        query = event.value.strip()
+        list_view = self.log_list if event.input is self.log_search else self.file_list
+        if event.input is self.log_search:
+            self.log_search_query = query
+        else:
+            self.file_search_query = query
+        self.search_list = list_view
+        if not query:
+            self.set_search_match(list_view, None)
+            list_view.focus()
+            self.refresh_search_lines(force=True)
+            return
+        self.jump_to_search_match(list_view, 1)
+
+    def search_input_for_list(self, list_view: ListView) -> Input:
+        return self.file_search if list_view is self.file_list else self.log_search
+
+    def search_label_for_list(self, list_view: ListView) -> Static:
+        return self.file_search_label if list_view is self.file_list else self.log_search_label
+
+    def search_query_for_list(self, list_view: ListView) -> str:
+        return self.file_search_query if list_view is self.file_list else self.log_search_query
+
+    def set_search_match(
+        self,
+        list_view: ListView,
+        match: tuple[int, int] | None,
+    ) -> None:
+        if list_view is self.file_list:
+            self.file_search_match = match
+        else:
+            self.log_search_match = match
+
+    def search_match_for_list(self, list_view: ListView) -> tuple[int, int] | None:
+        return self.file_search_match if list_view is self.file_list else self.log_search_match
+
+    def refresh_search_lines(self, force: bool = False) -> None:
+        self.refresh_search_line(
+            self.log_list,
+            self.log_search_label,
+            self.log_search,
+            force,
+        )
+        self.refresh_search_line(
+            self.file_list,
+            self.file_search_label,
+            self.file_search,
+            force,
+        )
+
+    def refresh_search_line(
+        self,
+        list_view: ListView,
+        search_label: Static,
+        search_input: Input,
+        force: bool = False,
+    ) -> None:
+        is_active = list_view.has_focus or search_input.has_focus
+        if not is_active:
+            search_label.display = False
+            search_input.display = False
+            return
+        query = self.search_query_for_list(list_view)
+        if search_input.has_focus and not force:
+            search_label.display = False
+            search_input.display = True
+            return
+        search_input.display = False
+        search_input.value = ""
+        search_label.display = True
+        search_label.update(format_search_label(
+            query,
+            self.search_match_for_list(list_view),
+            search_label.size.width,
+        ))
 
     def action_open_log_action_menu(self) -> None:
         if not self.log_list.has_focus and self.active_overlay is None:
@@ -984,12 +1118,14 @@ class LogScreen(Screen[None]):
         if event.list_view is self.log_list and isinstance(event.item, LogEntryRow):
             if self.active_overlay is not None:
                 self.hide_overlay_menus()
+            self.refresh_search_lines()
             self.update_log_message(event.item.log_entry)
             asyncio.create_task(self.load_changed_paths(event.item.log_entry))
             return
         if event.list_view is self.file_list and isinstance(event.item, LogPathRow):
             if self.active_overlay is not None:
                 self.hide_overlay_menus()
+            self.refresh_search_lines()
             self.file_path_scroll_offset = 0
             self.refresh_layout()
             log_row = self.current_log_row()
@@ -1134,11 +1270,14 @@ class LogScreen(Screen[None]):
         targets = self.focus_targets()
         if len(targets) == 1:
             targets[0].focus()
+            self.refresh_search_lines()
             return
         if self.file_list.has_focus:
             self.log_list.focus()
+            self.refresh_search_lines()
             return
         self.file_list.focus()
+        self.refresh_search_lines()
 
     def action_focus_previous_pane(self) -> None:
         self.action_focus_next_pane()
@@ -1249,7 +1388,7 @@ class HelpDialog(ModalScreen[None]):
         self.dismiss(None)
 
 
-class SvnTui(App[None]):
+class StatusScreen(Screen[None]):
     CSS = """
     Screen {
         layout: vertical;
@@ -1456,6 +1595,33 @@ class SvnTui(App[None]):
         height: 1fr;
     }
 
+    #status-search-label,
+    #log-search-label,
+    #log-file-search-label,
+    #status-search,
+    #log-search,
+    #log-file-search {
+        height: 1;
+        width: 1fr;
+        border: none;
+        padding: 0;
+        background: $panel;
+        color: $text-muted;
+    }
+
+    #status-search:focus,
+    #log-search:focus,
+    #log-file-search:focus {
+        border: none;
+        background: $panel;
+    }
+
+    #status-search > .input--placeholder,
+    #log-search > .input--placeholder,
+    #log-file-search > .input--placeholder {
+        color: $text-muted;
+    }
+
     #log-preview {
         overflow-y: auto;
         overflow-x: auto;
@@ -1494,7 +1660,6 @@ class SvnTui(App[None]):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
         Binding("r", "refresh_status", "Refresh"),
         Binding("space", "toggle_entry", "Stage"),
         Binding("v", "visual_select", "Visual"),
@@ -1505,6 +1670,9 @@ class SvnTui(App[None]):
         Binding("enter", "diff_entry", "Diff"),
         Binding("d", "diff_entry", "Diff"),
         Binding("b", "blame_entry", "Blame"),
+        Binding("slash", "search", "Search", key_display="/"),
+        Binding("n", "search_next", "Next", show=False),
+        Binding("N", "search_previous", "Previous", show=False),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
         Binding("ctrl+f", "page_down", "Page down", show=False),
@@ -1525,6 +1693,8 @@ class SvnTui(App[None]):
         self.entries: list[SvnStatusEntry] = []
         self.status_header = Static(format_status_header(), id="status-header")
         self.list_view = ListView(id="status-list")
+        self.search_label = Static(id="status-search-label")
+        self.search_input = Input(id="status-search", compact=True)
         self.detail = Static(id="details")
         self.preview = PreviewView(id="preview")
         self.status_theme = DEFAULT_THEME
@@ -1539,6 +1709,8 @@ class SvnTui(App[None]):
         self.path_scroll_offset = 0
         self.visual_anchor_index: int | None = None
         self.waiting_for_second_g = False
+        self.search_query = ""
+        self.search_match: tuple[int, int] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1546,6 +1718,8 @@ class SvnTui(App[None]):
             with Vertical(id="main"):
                 yield self.status_header
                 yield self.list_view
+                yield self.search_label
+                yield self.search_input
                 yield self.detail
             with Vertical(id="side"):
                 yield Static("Preview", id="preview-title")
@@ -1553,9 +1727,10 @@ class SvnTui(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.title = "svn-tui"
-        self.sub_title = str(self.client.target)
+        self.app.title = "svn-tui"
+        self.app.sub_title = str(self.client.target)
         self.set_interval(PATH_SCROLL_SECONDS, self.tick_path_scroll)
+        self.refresh_search_line()
         await self.load_status()
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
@@ -1563,6 +1738,7 @@ class SvnTui(App[None]):
         if isinstance(row, StatusRow):
             self.path_scroll_offset = 0
             self.refresh_status_rows()
+            self.refresh_search_line()
             self.update_detail(row)
             self.schedule_preview(row.entry)
 
@@ -1629,7 +1805,7 @@ class SvnTui(App[None]):
             )
             return
 
-        self.push_screen(
+        self.app.push_screen(
             CommitMessageDialog(len(selected)),
             lambda message: self.handle_commit_message(selected, message),
         )
@@ -1653,18 +1829,96 @@ class SvnTui(App[None]):
 
     def action_show_help(self) -> None:
         self.waiting_for_second_g = False
-        self.push_screen(HelpDialog())
+        self.app.push_screen(HelpDialog())
+
+    def action_search(self) -> None:
+        self.waiting_for_second_g = False
+        self.search_label.display = False
+        self.search_input.value = self.search_query
+        self.search_input.display = True
+        self.search_input.focus()
+        self.search_input.cursor_position = len(self.search_input.value)
+
+    def action_search_next(self) -> None:
+        self.waiting_for_second_g = False
+        self.jump_to_search_match(1)
+
+    def action_search_previous(self) -> None:
+        self.waiting_for_second_g = False
+        self.jump_to_search_match(-1)
+
+    def jump_to_search_match(self, direction: int) -> None:
+        if not self.search_query:
+            self.notify("Start a search with / first.", title="search", severity="warning")
+            return
+        index = find_list_match(
+            self.list_view,
+            self.search_query,
+            direction,
+            lambda row: status_row_search_text(row, self.client.display_root),
+        )
+        if index is None:
+            self.notify(f"No match: {self.search_query}", title="search", severity="warning")
+            self.search_match = None
+            self.list_view.focus()
+            self.refresh_search_line(force=True)
+            return
+        self.list_view.index = index
+        self.search_match = list_match_position(
+            self.list_view,
+            self.search_query,
+            index,
+            lambda row: status_row_search_text(row, self.client.display_root),
+        )
+        self.list_view.focus()
+        self.refresh_search_line(force=True)
+        if self.visual_anchor_index is not None:
+            self.refresh_status_rows()
+            self.update_detail(self.current_row())
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is not self.search_input:
+            return
+        event.stop()
+        self.search_query = event.value.strip()
+        if not self.search_query:
+            self.search_match = None
+            self.list_view.focus()
+            self.refresh_search_line(force=True)
+            return
+        self.jump_to_search_match(1)
+
+    def refresh_search_line(self, force: bool = False) -> None:
+        is_active = self.list_view.has_focus or self.search_input.has_focus
+        if not is_active:
+            self.search_label.display = False
+            self.search_input.display = False
+            return
+        if self.search_input.has_focus and not force:
+            self.search_label.display = False
+            self.search_input.display = True
+            return
+        self.search_input.display = False
+        self.search_input.value = ""
+        self.search_label.display = True
+        self.search_label.update(
+            format_search_label(
+                self.search_query,
+                self.search_match,
+                self.search_label.size.width,
+            )
+        )
 
     def action_show_log_screen(self) -> None:
         self.waiting_for_second_g = False
-        self.push_screen(LogScreen(self.client))
+        self.app.push_screen(LogScreen(self.client))
 
     def action_diff_entry(self) -> None:
         self.waiting_for_second_g = False
         row = self.current_row()
         if row is None:
             return
-        with self.suspend():
+        with self.app.suspend():
             self.client.open_diff(row.entry)
 
     def action_blame_entry(self) -> None:
@@ -1672,7 +1926,7 @@ class SvnTui(App[None]):
         row = self.current_row()
         if row is None:
             return
-        with self.suspend():
+        with self.app.suspend():
             error = self.client.open_blame(row.entry)
         if error:
             self.notify(error, title="svn blame failed", severity="warning")
@@ -1680,6 +1934,7 @@ class SvnTui(App[None]):
     def action_cursor_down(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_cursor_down()
+        self.refresh_search_line()
         if self.visual_anchor_index is not None:
             self.refresh_status_rows()
             self.update_detail(self.current_row())
@@ -1687,6 +1942,7 @@ class SvnTui(App[None]):
     def action_cursor_up(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_cursor_up()
+        self.refresh_search_line()
         if self.visual_anchor_index is not None:
             self.refresh_status_rows()
             self.update_detail(self.current_row())
@@ -1694,6 +1950,7 @@ class SvnTui(App[None]):
     def action_page_down(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_page_down()
+        self.refresh_search_line()
         if self.visual_anchor_index is not None:
             self.refresh_status_rows()
             self.update_detail(self.current_row())
@@ -1701,6 +1958,7 @@ class SvnTui(App[None]):
     def action_page_up(self) -> None:
         self.waiting_for_second_g = False
         self.list_view.action_page_up()
+        self.refresh_search_line()
         if self.visual_anchor_index is not None:
             self.refresh_status_rows()
             self.update_detail(self.current_row())
@@ -1743,6 +2001,7 @@ class SvnTui(App[None]):
         self.waiting_for_second_g = False
         if self.list_view.children:
             self.list_view.index = len(self.list_view.children) - 1
+            self.refresh_search_line()
             if self.visual_anchor_index is not None:
                 self.refresh_status_rows()
                 self.update_detail(self.current_row())
@@ -1753,6 +2012,7 @@ class SvnTui(App[None]):
     def move_to_top(self) -> None:
         if self.list_view.children:
             self.list_view.index = 0
+            self.refresh_search_line()
             if self.visual_anchor_index is not None:
                 self.refresh_status_rows()
                 self.update_detail(self.current_row())
@@ -2050,6 +2310,132 @@ class SvnTui(App[None]):
         return detail
 
 
+class SvnTui(App[None]):
+    CSS = StatusScreen.CSS
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+    ]
+
+    def __init__(self, target: Path) -> None:
+        super().__init__()
+        self.target = target
+
+    def on_mount(self) -> None:
+        self.push_screen(StatusScreen(self.target))
+
+
+def find_list_match(
+    list_view: ListView,
+    query: str,
+    direction: int,
+    text_for_row: object,
+) -> int | None:
+    children = list(list_view.children)
+    if not children:
+        return None
+
+    normalized_query = query.casefold()
+    step = 1 if direction >= 0 else -1
+    start = list_view.index if list_view.index is not None else -1
+    for offset in range(1, len(children) + 1):
+        index = (start + step * offset) % len(children)
+        row_text = text_for_row(children[index])
+        if normalized_query in row_text.casefold():
+            return index
+    return None
+
+
+def list_match_position(
+    list_view: ListView,
+    query: str,
+    matched_index: int,
+    text_for_row: object,
+) -> tuple[int, int]:
+    normalized_query = query.casefold()
+    match_indices = [
+        index
+        for index, row in enumerate(list_view.children)
+        if normalized_query in text_for_row(row).casefold()
+    ]
+    total = len(match_indices)
+    if total == 0:
+        return (0, 0)
+    try:
+        current = match_indices.index(matched_index) + 1
+    except ValueError:
+        current = 0
+    return current, total
+
+
+def format_search_label(
+    query: str,
+    match: tuple[int, int] | None,
+    width: int = 0,
+) -> Text:
+    if not query:
+        return Text("Searching: / to search", style="dim")
+    left = f"Searching: {query}"
+    right_count = "[0/0]"
+    if match is None:
+        return align_search_label(left, right_count, width)
+    current, total = match
+    return align_search_label(left, f"[{current}/{total}]", width)
+
+
+def align_search_label(left: str, right_count: str, width: int) -> Text:
+    jump_hint = "Jump by n/N"
+    right = f"{right_count} {jump_hint}"
+    if width <= 0:
+        gap = 1
+    else:
+        gap = max(1, width - len(left) - len(right))
+    text = Text(left, style="dim")
+    text.append(" " * gap)
+    text.append(right_count, style="dim")
+    text.append(" ")
+    text.append(jump_hint, style="bold")
+    return text
+
+
+def status_row_search_text(row: object, display_root: Path) -> str:
+    if not isinstance(row, StatusRow):
+        return ""
+    shown_path = relative_path(row.entry.path, display_root)
+    return " ".join(
+        [
+            row.entry.raw_status,
+            row.entry.status_label,
+            str(shown_path),
+            str(row.entry.path),
+            file_extension(row.entry.path),
+            file_size_label(row.entry.path),
+        ]
+    )
+
+
+def log_row_search_text(row: object) -> str:
+    if isinstance(row, LogEntryRow):
+        return " ".join(
+            [
+                row.log_entry.revision,
+                row.log_entry.author,
+                row.log_entry.date,
+                row.log_entry.summary,
+                row.log_entry.message,
+            ]
+        )
+    if isinstance(row, LogPathRow):
+        return " ".join(
+            [
+                row.path_entry.action,
+                row.path_entry.node_kind,
+                row.path_entry.path,
+                row.shown_path,
+            ]
+        )
+    return ""
+
+
 def parse_svn_status_line(line: str, root: Path) -> SvnStatusEntry | None:
     if not line:
         return None
@@ -2174,7 +2560,7 @@ def format_status_row(
 def format_log_row(entry: SvnLogEntry, row_width: int = 0) -> Text:
     summary_width = log_summary_width(row_width)
     row = Text()
-    row.append(f"{('r' + entry.revision):<{LOG_REVISION_WIDTH}}", style="bold cyan")
+    row.append(f"{entry.revision:<{LOG_REVISION_WIDTH}}", style="bold cyan")
     row.append(" ")
     row.append(f"{entry.author:<{LOG_AUTHOR_WIDTH}}", style="green")
     row.append(" ")
