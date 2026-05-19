@@ -226,6 +226,40 @@ class SvnClient:
     async def commit(self, message: str, paths: list[Path]) -> str:
         return await run_command_text(build_svn_commit_args(message, paths))
 
+    def open_blame(self, entry: SvnStatusEntry) -> str | None:
+        if entry.text_status in {"?", "I"}:
+            return "Blame is unavailable for unversioned or ignored files."
+        if entry.path.is_dir():
+            return "Blame is unavailable for directories."
+        if not entry.path.exists():
+            return "Blame is unavailable because the file does not exist locally."
+
+        blame = subprocess.run(
+            ["svn", "blame", "--", str(entry.path)],
+            check=False,
+            capture_output=True,
+        )
+        if blame.returncode != 0:
+            message = blame.stderr.decode("utf-8", errors="replace").strip()
+            return message or "svn blame failed."
+
+        suffix = entry.path.suffix
+        with tempfile.NamedTemporaryFile(
+            mode="w+b",
+            prefix=f"svn-blame-{entry.path.stem}-",
+            suffix=suffix,
+            delete=False,
+        ) as blame_file:
+            blame_path = Path(blame_file.name)
+            blame_file.write(blame.stdout)
+
+        try:
+            subprocess.run(["nvim", "-R", str(blame_path)])
+        finally:
+            blame_path.unlink(missing_ok=True)
+
+        return None
+
     def open_diff(self, entry: SvnStatusEntry) -> None:
         if entry.text_status in {"?", "I"}:
             subprocess.run(["nvim", str(entry.path)])
@@ -605,6 +639,7 @@ class SvnTui(App[None]):
         Binding("question_mark", "show_help", "Help", key_display="?"),
         Binding("enter", "diff_entry", "Diff"),
         Binding("d", "diff_entry", "Diff"),
+        Binding("b", "blame_entry", "Blame"),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
         Binding("ctrl+f", "page_down", "Page down", show=False),
@@ -762,6 +797,16 @@ class SvnTui(App[None]):
             return
         with self.suspend():
             self.client.open_diff(row.entry)
+
+    def action_blame_entry(self) -> None:
+        self.waiting_for_second_g = False
+        row = self.current_row()
+        if row is None:
+            return
+        with self.suspend():
+            error = self.client.open_blame(row.entry)
+        if error:
+            self.notify(error, title="svn blame failed", severity="warning")
 
     def action_cursor_down(self) -> None:
         self.waiting_for_second_g = False
@@ -1288,6 +1333,7 @@ def format_help_text() -> Text:
         ("c", "Open commit message dialog for checked entries"),
         ("Ctrl+Enter", "Commit from the commit message dialog"),
         ("Enter / d", "Open the current entry in nvim diff"),
+        ("b", "Open svn blame for the current entry in read-only nvim"),
         ("j / k", "Move selection down or up"),
         ("Ctrl+f / Ctrl+b", "Page the status list down or up"),
         ("gg / G", "Jump to top or bottom of the status list"),

@@ -59,6 +59,7 @@ python main.py
 | `Ctrl-Enter` | 在提交弹窗中确认提交 |
 | `Esc` | 退出范围多选模式，或在弹窗中取消 / 关闭 |
 | `Enter` / `d` | 打开当前条目的 `nvim -d` |
+| `b` | 用只读 `nvim` 打开当前条目的 `svn blame` |
 | `r` | 刷新 `svn st` |
 | `Ctrl-e` / `Ctrl-y` | 预览向下 / 向上滚动一行 |
 | `Ctrl-d` / `Ctrl-u` | 预览向下 / 向上滚动半页 |
