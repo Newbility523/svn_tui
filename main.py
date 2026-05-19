@@ -4,8 +4,10 @@ import argparse
 import asyncio
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock
 
@@ -18,7 +20,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.geometry import Size
 from textual.scroll_view import ScrollView
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.strip import Strip
 from textual.widgets import Button, Footer, Header, Label, ListItem, ListView, Static, TextArea
 
@@ -39,6 +41,12 @@ SIZE_COLUMN_WIDTH = 8
 PATH_COLUMN_MIN_WIDTH = 8
 PATH_SCROLL_SEPARATOR = "   "
 PATH_SCROLL_SECONDS = 0.25
+LOG_ENTRY_LIMIT = 30
+LOG_REVISION_WIDTH = 10
+LOG_AUTHOR_WIDTH = 14
+LOG_DATE_WIDTH = 16
+LOG_ACTION_WIDTH = 4
+LOG_KIND_WIDTH = 4
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,27 @@ class SvnStatusEntry:
     @property
     def status_label(self) -> str:
         return self.raw_status.strip() or "?"
+
+
+@dataclass(frozen=True)
+class SvnLogPathEntry:
+    action: str
+    node_kind: str
+    path: str
+
+
+@dataclass(frozen=True)
+class SvnLogEntry:
+    revision: str
+    author: str
+    date: str
+    message: str
+    changed_paths: list[SvnLogPathEntry]
+
+    @property
+    def summary(self) -> str:
+        first_line = self.message.splitlines()[0].strip() if self.message.strip() else ""
+        return first_line or "(no message)"
 
 
 @dataclass
@@ -202,6 +231,10 @@ class SvnClient:
         self.display_root = self.target if self.target.is_dir() else self.target.parent
         self.root = self.display_root
         self.root_loaded = False
+        self.repo_root_url = ""
+        self.target_url = ""
+        self.target_repo_path = ""
+        self.repo_info_loaded = False
 
     async def ensure_working_copy_root(self) -> None:
         if self.root_loaded:
@@ -225,6 +258,60 @@ class SvnClient:
 
     async def commit(self, message: str, paths: list[Path]) -> str:
         return await run_command_text(build_svn_commit_args(message, paths))
+
+    async def ensure_repository_metadata(self) -> None:
+        if self.repo_info_loaded:
+            return
+        probe = self.target if self.target.is_dir() else self.target.parent
+        repo_root_url = await run_command_text(
+            ["svn", "info", "--show-item", "repos-root-url", str(probe)]
+        )
+        target_url = await run_command_text(["svn", "info", "--show-item", "url", str(probe)])
+        self.repo_root_url = repo_root_url.strip().rstrip("/")
+        self.target_url = target_url.strip()
+        if self.repo_root_url and self.target_url.startswith(self.repo_root_url):
+            suffix = self.target_url[len(self.repo_root_url) :].strip("/")
+            self.target_repo_path = f"/{suffix}" if suffix else "/"
+        else:
+            self.target_repo_path = ""
+        self.repo_info_loaded = True
+
+    async def recent_logs(self, limit: int = LOG_ENTRY_LIMIT) -> list[SvnLogEntry]:
+        await self.ensure_repository_metadata()
+        stdout = await run_command_text(
+            ["svn", "log", "--xml", "-v", "-l", str(limit), self.target_url]
+        )
+        return parse_svn_log_xml(stdout)
+
+    async def diff_for_log_path(
+        self,
+        revision: str,
+        path_entry: SvnLogPathEntry,
+    ) -> str:
+        await self.ensure_repository_metadata()
+        url = self.repo_path_to_url(path_entry.path)
+        revision_number = int(revision) if revision.isdigit() else None
+        candidates: list[str] = []
+        if revision_number is not None and path_entry.action == "D" and revision_number > 0:
+            candidates.append(f"{url}@{revision_number - 1}")
+        if revision_number is not None:
+            candidates.append(f"{url}@{revision_number}")
+        candidates.append(url)
+
+        error: subprocess.CalledProcessError | None = None
+        for candidate in dedupe_strings(candidates):
+            try:
+                return await run_command_text(["svn", "diff", "-c", revision, candidate])
+            except subprocess.CalledProcessError as exc:
+                error = exc
+        if error is not None:
+            raise error
+        return ""
+
+    def repo_path_to_url(self, repo_path: str) -> str:
+        if repo_path.startswith("/") and self.repo_root_url:
+            return f"{self.repo_root_url}{repo_path}"
+        return repo_path
 
     def open_blame(self, entry: SvnStatusEntry) -> str | None:
         if entry.text_status in {"?", "I"}:
@@ -444,6 +531,660 @@ class PreviewView(ScrollView):
         return Strip(normalized)
 
 
+class TextPreviewView(ScrollView):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.lines: list[str] | None = None
+        self.message: Text | None = Text("No diff selected.", style="dim")
+        self.lexer = "diff"
+        self.line_numbers = False
+        self.line_cache: OrderedDict[int, Strip] = OrderedDict()
+
+    def set_message(self, message: Text) -> None:
+        self.lines = None
+        self.message = message
+        self.line_cache.clear()
+        self.virtual_size = Size(1, 1)
+        self.scroll_to(x=0, y=0, animate=False, immediate=True)
+        self.refresh(layout=True)
+
+    def set_text(
+        self,
+        content: str,
+        *,
+        lexer: str = "diff",
+        line_numbers: bool = False,
+        reset_scroll: bool = True,
+    ) -> None:
+        self.lines = content.splitlines()
+        if content.endswith("\n"):
+            self.lines.append("")
+        if not self.lines:
+            self.lines = [""]
+        self.message = None
+        self.lexer = lexer
+        self.line_numbers = line_numbers
+        self.line_cache.clear()
+        self.virtual_size = Size(PREVIEW_RENDER_COLUMNS, len(self.lines))
+        if reset_scroll:
+            self.scroll_to(x=0, y=0, animate=False, immediate=True)
+        self.refresh(layout=True)
+
+    def render_line(self, y: int) -> Strip:
+        width = self.size.width
+        if width <= 0:
+            return Strip.blank(0, self.visual_style.rich_style)
+
+        if self.lines is None:
+            if y == 0 and self.message is not None:
+                return self.render_rich_line(self.message)
+            return Strip.blank(width, self.visual_style.rich_style)
+
+        document_y = int(self.scroll_y) + y
+        if document_y < 0 or document_y >= len(self.lines):
+            return Strip.blank(width, self.visual_style.rich_style)
+
+        strip = self.line_cache.get(document_y)
+        if strip is None:
+            syntax = Syntax(
+                self.lines[document_y],
+                self.lexer,
+                theme="ansi_dark",
+                line_numbers=self.line_numbers,
+                start_line=document_y + 1,
+                word_wrap=False,
+            )
+            strip = self.render_rich_line(syntax)
+            self.line_cache[document_y] = strip
+            if len(self.line_cache) > PREVIEW_LINE_CACHE_SIZE:
+                self.line_cache.popitem(last=False)
+        else:
+            self.line_cache.move_to_end(document_y)
+
+        return strip.crop_pad(
+            width,
+            int(self.scroll_x),
+            int(self.scroll_x) + width,
+            self.visual_style.rich_style,
+        )
+
+    def render_rich_line(self, renderable: object) -> Strip:
+        options = self.app.console.options.update_width(PREVIEW_RENDER_COLUMNS)
+        lines = self.app.console.render_lines(renderable, options, pad=False)
+        segments = lines[0] if lines else []
+        normalized = [
+            Segment(segment.text, segment.style or Style(), segment.control)
+            for segment in segments
+        ]
+        return Strip(normalized)
+
+
+class LogEntryRow(ListItem):
+    def __init__(self, log_entry: SvnLogEntry) -> None:
+        super().__init__()
+        self.log_entry = log_entry
+        self.label = Label()
+        self.row_width = 0
+
+    def compose(self) -> ComposeResult:
+        yield self.label
+
+    def on_mount(self) -> None:
+        self.refresh_label()
+
+    def refresh_label(self, row_width: int | None = None) -> None:
+        if row_width is not None:
+            self.row_width = row_width
+        self.label.update(format_log_row(self.log_entry, self.row_width))
+
+
+class LogPathRow(ListItem):
+    def __init__(self, path_entry: SvnLogPathEntry, shown_path: str) -> None:
+        super().__init__()
+        self.path_entry = path_entry
+        self.shown_path = shown_path
+        self.label = Label()
+        self.row_width = 0
+        self.is_highlighted = False
+        self.path_scroll_offset = 0
+
+    def compose(self) -> ComposeResult:
+        yield self.label
+
+    def on_mount(self) -> None:
+        self.refresh_label()
+
+    def refresh_label(
+        self,
+        row_width: int | None = None,
+        is_highlighted: bool | None = None,
+        path_scroll_offset: int | None = None,
+    ) -> None:
+        if row_width is not None:
+            self.row_width = row_width
+        if is_highlighted is not None:
+            self.is_highlighted = is_highlighted
+        if path_scroll_offset is not None:
+            self.path_scroll_offset = path_scroll_offset
+        self.label.update(
+            format_log_path_row(
+                self.path_entry,
+                self.shown_path,
+                self.row_width,
+                self.is_highlighted,
+                self.path_scroll_offset,
+            )
+        )
+
+    def path_needs_scroll(self, row_width: int) -> bool:
+        return len(self.shown_path) > log_path_width(row_width)
+
+
+class OverlayMenuItem(ListItem):
+    def __init__(
+        self,
+        option_id: str,
+        label_text: str,
+        *,
+        has_submenu: bool = False,
+    ) -> None:
+        super().__init__()
+        self.option_id = option_id
+        self.label_text = label_text
+        self.has_submenu = has_submenu
+
+    def compose(self) -> ComposeResult:
+        if self.has_submenu:
+            yield Label(f"{self.label_text:<20}>")
+            return
+        yield Label(self.label_text)
+
+
+class LogScreen(Screen[None]):
+    BINDINGS = [
+        Binding("ctrl+l", "close", "Back"),
+        Binding("tab", "focus_next_pane", "Switch pane"),
+        Binding("shift+tab", "focus_previous_pane", "Prev pane", show=False),
+        Binding("p", "open_log_action_menu", "Popup"),
+        Binding("L", "enter_submenu", "Submenu", show=False),
+        Binding("enter", "activate_current", "Select"),
+        Binding("escape", "dismiss_overlay", "Close", show=False),
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("ctrl+f", "page_down", "Page down", show=False),
+        Binding("ctrl+b", "page_up", "Page up", show=False),
+        Binding("ctrl+e", "preview_scroll_down", "Preview down", show=False),
+        Binding("ctrl+y", "preview_scroll_up", "Preview up", show=False),
+        Binding("ctrl+d", "preview_half_page_down", "Preview half down", show=False),
+        Binding("ctrl+u", "preview_half_page_up", "Preview half up", show=False),
+        Binding("shift+right", "preview_scroll_right", "Preview right", show=False),
+        Binding("shift+left", "preview_scroll_left", "Preview left", show=False),
+    ]
+
+    def __init__(self, client: SvnClient) -> None:
+        super().__init__()
+        self.client = client
+        self.log_list_header = Static(id="log-list-header")
+        self.log_list = ListView(id="log-list")
+        self.log_message = Static(id="log-message")
+        self.file_list_header = Static(id="log-file-list-header")
+        self.file_list = ListView(id="log-file-list")
+        self.action_menu = ListView(
+            OverlayMenuItem("revert_to_this", "revert to this"),
+            OverlayMenuItem("revert_changes_from", "revert changes from"),
+            OverlayMenuItem("copy", "copy", has_submenu=True),
+            id="log-action-menu",
+        )
+        self.copy_menu = ListView(
+            OverlayMenuItem("revision", "revision"),
+            OverlayMenuItem("author", "author"),
+            OverlayMenuItem("message", "message"),
+            id="log-copy-menu",
+        )
+        self.preview = TextPreviewView(id="log-preview")
+        self.preview_title = Static("Diff Preview", id="log-preview-title")
+        self.logs: list[SvnLogEntry] = []
+        self.path_request_id = 0
+        self.preview_request_id = 0
+        self.file_path_scroll_offset = 0
+        self.active_overlay: str | None = None
+        self.copy_menu_reopen_locked = False
+        self.load_logs_task: asyncio.Task[None] | None = None
+        self.diff_task: asyncio.Task[None] | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            f"Recent Log  {self.client.display_root}",
+            id="log-banner",
+        )
+        with Horizontal(id="log-body"):
+            with Vertical(id="log-left"):
+                with Vertical(classes="log-pane", id="log-list-pane"):
+                    yield Static("Recent Logs", classes="log-pane-title")
+                    yield self.log_list_header
+                    yield self.log_list
+                with Vertical(classes="log-pane", id="log-message-pane"):
+                    yield Static("Message", classes="log-pane-title")
+                    yield self.log_message
+                with Vertical(classes="log-pane", id="log-files-pane"):
+                    yield Static("Changed Files", classes="log-pane-title")
+                    yield self.file_list_header
+                    yield self.file_list
+            with Vertical(classes="log-pane", id="log-right"):
+                yield self.preview_title
+                yield self.preview
+        yield self.action_menu
+        yield self.copy_menu
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.log_list.focus()
+        self.refresh_layout()
+        self.set_interval(PATH_SCROLL_SECONDS, self.tick_path_scroll)
+        self.preview_title.update("Diff Preview")
+        self.preview.set_message(Text("Loading recent log...", style="dim"))
+        self.log_message.update(Text("Loading log message...", style="dim"))
+        self.action_menu.display = False
+        self.copy_menu.display = False
+        self.load_logs_task = asyncio.create_task(self.load_logs())
+
+    def on_resize(self, event: object) -> None:
+        del event
+        self.refresh_layout()
+
+    async def load_logs(self) -> None:
+        self.preview_title.update("Diff Preview")
+        self.preview.set_message(Text("Loading recent log...", style="dim"))
+        try:
+            logs = await self.client.recent_logs()
+        except FileNotFoundError as exc:
+            self.notify(
+                f"command not found: {exc.filename}",
+                title="command failed",
+                severity="error",
+            )
+            self.preview.set_message(Text("Unable to load svn log.", style="red"))
+            self.log_message.update(Text("Unable to load svn log.", style="red"))
+            return
+        except subprocess.CalledProcessError as exc:
+            message = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.notify(message, title="svn log failed", severity="error")
+            self.preview.set_message(Text(message, style="red"))
+            self.log_message.update(Text(message, style="red"))
+            return
+        except asyncio.CancelledError:
+            return
+
+        self.logs = logs
+        await self.log_list.clear()
+        await self.file_list.clear()
+        if not logs:
+            await self.log_list.append(ListItem(Label("No recent log entries.")))
+            self.preview.set_message(Text("No recent log entries.", style="dim"))
+            self.log_message.update(Text("No recent log entries.", style="dim"))
+            return
+
+        await self.log_list.extend(LogEntryRow(log_entry) for log_entry in logs)
+        self.log_list.index = 0
+        self.refresh_layout()
+        self.update_log_message(logs[0])
+        await self.load_changed_paths(logs[0])
+
+    def on_unmount(self) -> None:
+        if self.load_logs_task is not None:
+            self.load_logs_task.cancel()
+        if self.diff_task is not None:
+            self.diff_task.cancel()
+
+    def refresh_layout(self) -> None:
+        log_width = max(self.log_list.size.width, 80)
+        file_width = self.log_file_row_width()
+        self.log_list_header.update(format_log_header(log_width))
+        self.file_list_header.update(format_log_path_header(file_width))
+        for child in self.log_list.children:
+            if isinstance(child, LogEntryRow):
+                child.refresh_label(log_width)
+        current_path_row = self.current_path_row()
+        for child in self.file_list.children:
+            if isinstance(child, LogPathRow):
+                is_highlighted = child is current_path_row
+                child.refresh_label(
+                    file_width,
+                    is_highlighted,
+                    self.file_path_scroll_offset if is_highlighted else 0,
+                )
+
+    def update_log_message(self, log_entry: SvnLogEntry) -> None:
+        message = log_entry.message.strip() or "(no message)"
+        self.log_message.update(Text(message))
+
+    def hide_overlay_menus(self) -> None:
+        self.action_menu.display = False
+        self.copy_menu.display = False
+        self.active_overlay = None
+        self.copy_menu_reopen_locked = False
+
+    def action_dismiss_overlay(self) -> None:
+        if self.active_overlay is None:
+            return
+        if self.active_overlay == "copy":
+            self.copy_menu.display = False
+            self.active_overlay = "action"
+            self.copy_menu_reopen_locked = True
+            self.action_menu.focus()
+            return
+        self.hide_overlay_menus()
+        self.log_list.focus()
+
+    def action_open_log_action_menu(self) -> None:
+        if not self.log_list.has_focus and self.active_overlay is None:
+            return
+        if self.current_log_row() is None:
+            return
+        self.copy_menu.display = False
+        self.copy_menu_reopen_locked = False
+        self.position_action_menu()
+        self.action_menu.display = True
+        self.active_overlay = "action"
+        self.action_menu.index = 0
+        self.action_menu.focus()
+
+    def position_action_menu(self) -> None:
+        x, y = self.log_menu_anchor()
+        self.action_menu.styles.offset = (x, y)
+
+    def position_copy_menu(self) -> None:
+        x, y = self.log_menu_anchor()
+        action_menu_width = 24
+        copy_x = min(self.size.width - 18, x + action_menu_width)
+        self.copy_menu.styles.offset = (copy_x, y)
+
+    def log_menu_anchor(self) -> tuple[int, int]:
+        row_index = self.log_list.index or 0
+        visible_y = max(0, row_index - int(self.log_list.scroll_y))
+        x = min(self.size.width - 26, self.log_list.region.x + 16)
+        y = min(self.size.height - 6, self.log_list.region.y + visible_y)
+        return max(0, x), max(0, y)
+
+    def current_overlay_item(self) -> OverlayMenuItem | None:
+        menu = self.copy_menu if self.active_overlay == "copy" else self.action_menu
+        highlighted = menu.highlighted_child
+        if isinstance(highlighted, OverlayMenuItem):
+            return highlighted
+        if menu.index is None or menu.index >= len(menu.children):
+            return None
+        indexed = menu.children[menu.index]
+        return indexed if isinstance(indexed, OverlayMenuItem) else None
+
+    def action_activate_current(self) -> None:
+        if self.active_overlay == "action":
+            item = self.current_overlay_item()
+            if item is None:
+                return
+            self.activate_action_menu_item(item.option_id)
+            return
+        if self.active_overlay == "copy":
+            item = self.current_overlay_item()
+            if item is None:
+                return
+            self.copy_log_field(item.option_id)
+            return
+
+    def action_enter_submenu(self) -> None:
+        if self.active_overlay != "action":
+            return
+        item = self.current_overlay_item()
+        if item is None or item.option_id != "copy":
+            return
+        if self.copy_menu_reopen_locked:
+            return
+        self.position_copy_menu()
+        self.copy_menu.display = True
+        self.active_overlay = "copy"
+        self.copy_menu.index = 0
+        self.copy_menu.focus()
+
+    def activate_action_menu_item(self, option_id: str) -> None:
+        if option_id == "copy":
+            return
+        if option_id == "revert_to_this":
+            self.notify("revert to this: not implemented yet", title="log action")
+        elif option_id == "revert_changes_from":
+            self.notify("revert changes from: not implemented yet", title="log action")
+        self.hide_overlay_menus()
+        self.log_list.focus()
+
+    def copy_log_field(self, option_id: str) -> None:
+        row = self.current_log_row()
+        if row is None:
+            return
+        value_map = {
+            "revision": row.log_entry.revision,
+            "author": row.log_entry.author,
+            "message": row.log_entry.message.strip() or "(no message)",
+        }
+        value = value_map.get(option_id)
+        if value is None:
+            return
+        self.app.copy_to_clipboard(value)
+        self.notify(f"Copied {option_id}.", title="clipboard")
+        self.hide_overlay_menus()
+        self.log_list.focus()
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.list_view is self.log_list and isinstance(event.item, LogEntryRow):
+            if self.active_overlay is not None:
+                self.hide_overlay_menus()
+            self.update_log_message(event.item.log_entry)
+            asyncio.create_task(self.load_changed_paths(event.item.log_entry))
+            return
+        if event.list_view is self.file_list and isinstance(event.item, LogPathRow):
+            if self.active_overlay is not None:
+                self.hide_overlay_menus()
+            self.file_path_scroll_offset = 0
+            self.refresh_layout()
+            log_row = self.current_log_row()
+            if log_row is None:
+                return
+            self.schedule_diff(log_row.log_entry, event.item.path_entry)
+            return
+        if event.list_view is self.action_menu and isinstance(event.item, OverlayMenuItem):
+            if event.item.option_id != "copy":
+                self.copy_menu.display = False
+                self.copy_menu_reopen_locked = False
+            return
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view is self.action_menu and isinstance(event.item, OverlayMenuItem):
+            self.activate_action_menu_item(event.item.option_id)
+            event.stop()
+            return
+        if event.list_view is self.copy_menu and isinstance(event.item, OverlayMenuItem):
+            self.copy_log_field(event.item.option_id)
+            event.stop()
+
+    async def load_changed_paths(self, log_entry: SvnLogEntry) -> None:
+        self.path_request_id += 1
+        request_id = self.path_request_id
+        await self.file_list.clear()
+        if request_id != self.path_request_id:
+            return
+
+        if not log_entry.changed_paths:
+            await self.file_list.append(ListItem(Label("No changed paths.")))
+            self.preview_title.update(f"Diff Preview r{log_entry.revision}")
+            self.preview.set_message(Text(log_entry.message or "(no message)", style="dim"))
+            return
+
+        shown_rows = [
+            LogPathRow(path_entry, repo_relative_path(path_entry.path, self.client.target_repo_path))
+            for path_entry in log_entry.changed_paths
+        ]
+        await self.file_list.extend(shown_rows)
+        if request_id != self.path_request_id:
+            return
+        self.file_list.index = 0
+        self.file_path_scroll_offset = 0
+        self.refresh_layout()
+        self.schedule_diff(log_entry, log_entry.changed_paths[0])
+
+    def schedule_diff(self, log_entry: SvnLogEntry, path_entry: SvnLogPathEntry) -> None:
+        self.preview_request_id += 1
+        request_id = self.preview_request_id
+        if self.diff_task is not None:
+            self.diff_task.cancel()
+        shown_path = repo_relative_path(path_entry.path, self.client.target_repo_path)
+        self.preview_title.update(f"Diff Preview r{log_entry.revision}  {shown_path}")
+        self.preview.set_message(Text("Loading diff...", style="dim"))
+        self.diff_task = asyncio.create_task(
+            self.load_diff(log_entry, path_entry, request_id)
+        )
+
+    async def load_diff(
+        self,
+        log_entry: SvnLogEntry,
+        path_entry: SvnLogPathEntry,
+        request_id: int,
+    ) -> None:
+        try:
+            diff_text = await self.client.diff_for_log_path(log_entry.revision, path_entry)
+        except FileNotFoundError as exc:
+            if request_id != self.preview_request_id:
+                return
+            self.notify(
+                f"command not found: {exc.filename}",
+                title="command failed",
+                severity="error",
+            )
+            self.preview.set_message(Text("Unable to load svn diff.", style="red"))
+            return
+        except subprocess.CalledProcessError as exc:
+            if request_id != self.preview_request_id:
+                return
+            message = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.notify(message, title="svn diff failed", severity="error")
+            self.preview.set_message(Text(message, style="red"))
+            return
+        except asyncio.CancelledError:
+            return
+
+        if request_id != self.preview_request_id:
+            return
+        if not diff_text.strip():
+            self.preview.set_message(Text("No textual diff for this path.", style="dim"))
+            return
+        self.preview.set_text(diff_text, lexer="diff", line_numbers=False)
+
+    def current_log_row(self) -> LogEntryRow | None:
+        highlighted = self.log_list.highlighted_child
+        if isinstance(highlighted, LogEntryRow):
+            return highlighted
+        if self.log_list.index is None or self.log_list.index >= len(self.log_list.children):
+            return None
+        indexed = self.log_list.children[self.log_list.index]
+        return indexed if isinstance(indexed, LogEntryRow) else None
+
+    def current_path_row(self) -> LogPathRow | None:
+        highlighted = self.file_list.highlighted_child
+        if isinstance(highlighted, LogPathRow):
+            return highlighted
+        if self.file_list.index is None or self.file_list.index >= len(self.file_list.children):
+            return None
+        indexed = self.file_list.children[self.file_list.index]
+        return indexed if isinstance(indexed, LogPathRow) else None
+
+    def log_file_row_width(self) -> int:
+        return max(self.file_list.size.width, self.file_list_header.size.width, 48)
+
+    def tick_path_scroll(self) -> None:
+        row = self.current_path_row()
+        if row is None:
+            return
+        row_width = self.log_file_row_width()
+        if not row.path_needs_scroll(row_width):
+            if self.file_path_scroll_offset != 0:
+                self.file_path_scroll_offset = 0
+                self.refresh_layout()
+            return
+        cycle_width = len(row.shown_path) + len(PATH_SCROLL_SEPARATOR)
+        self.file_path_scroll_offset = (self.file_path_scroll_offset + 1) % cycle_width
+        row.refresh_label(
+            row_width,
+            True,
+            self.file_path_scroll_offset,
+        )
+
+    def focus_targets(self) -> list[ListView]:
+        if self.file_list.children:
+            return [self.log_list, self.file_list]
+        return [self.log_list]
+
+    def action_focus_next_pane(self) -> None:
+        if self.active_overlay is not None:
+            return
+        targets = self.focus_targets()
+        if len(targets) == 1:
+            targets[0].focus()
+            return
+        if self.file_list.has_focus:
+            self.log_list.focus()
+            return
+        self.file_list.focus()
+
+    def action_focus_previous_pane(self) -> None:
+        self.action_focus_next_pane()
+
+    def focused_list(self) -> ListView:
+        if self.active_overlay == "copy":
+            return self.copy_menu
+        if self.active_overlay == "action":
+            return self.action_menu
+        if self.file_list.has_focus:
+            return self.file_list
+        return self.log_list
+
+    def action_cursor_down(self) -> None:
+        self.focused_list().action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.focused_list().action_cursor_up()
+
+    def action_page_down(self) -> None:
+        self.focused_list().action_page_down()
+
+    def action_page_up(self) -> None:
+        self.focused_list().action_page_up()
+
+    def action_preview_scroll_down(self) -> None:
+        self.preview.scroll_relative(y=1, animate=False, immediate=True)
+
+    def action_preview_scroll_up(self) -> None:
+        self.preview.scroll_relative(y=-1, animate=False, immediate=True)
+
+    def action_preview_half_page_down(self) -> None:
+        self.preview.scroll_relative(
+            y=max(1, self.preview.size.height // 2),
+            animate=False,
+            immediate=True,
+        )
+
+    def action_preview_half_page_up(self) -> None:
+        self.preview.scroll_relative(
+            y=-max(1, self.preview.size.height // 2),
+            animate=False,
+            immediate=True,
+        )
+
+    def action_preview_scroll_right(self) -> None:
+        self.preview.scroll_relative(x=8, animate=False, immediate=True)
+
+    def action_preview_scroll_left(self) -> None:
+        self.preview.scroll_relative(x=-8, animate=False, immediate=True)
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
 class CommitMessageDialog(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
@@ -627,6 +1368,119 @@ class SvnTui(App[None]):
         height: 1fr;
         margin-top: 1;
     }
+
+    LogScreen {
+        layout: vertical;
+    }
+
+    #log-banner {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #log-body {
+        height: 1fr;
+    }
+
+    #log-left {
+        width: 40%;
+        min-width: 36;
+    }
+
+    #log-right {
+        width: 1fr;
+        border-left: solid $surface;
+        padding: 0 1;
+    }
+
+    .log-pane {
+        height: 1fr;
+    }
+
+    #log-list-pane {
+        height: 2fr;
+        border-bottom: solid $surface;
+    }
+
+    #log-message-pane {
+        height: 7;
+        border-bottom: solid $surface;
+    }
+
+    #log-files-pane {
+        height: 1fr;
+    }
+
+    .log-pane-title {
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #log-list-header,
+    #log-file-list-header {
+        height: 1;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #log-message {
+        height: 1fr;
+    }
+
+    #log-preview-title {
+        height: 1;
+        margin-bottom: 1;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #log-list,
+    #log-file-list,
+    #log-preview {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #log-preview {
+        overflow-y: auto;
+        overflow-x: auto;
+        scrollbar-gutter: stable;
+        scrollbar-size-horizontal: 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-visibility: visible;
+    }
+
+    #log-action-menu,
+    #log-copy-menu {
+        layer: overlay;
+        position: absolute;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #log-action-menu {
+        width: 24;
+        height: 5;
+    }
+
+    #log-copy-menu {
+        width: 18;
+        height: 5;
+    }
+
+    LogEntryRow,
+    LogPathRow {
+        height: 1;
+    }
+
+    OverlayMenuItem {
+        height: 1;
+    }
     """
 
     BINDINGS = [
@@ -636,6 +1490,7 @@ class SvnTui(App[None]):
         Binding("v", "visual_select", "Visual"),
         Binding("escape", "exit_visual_select", "Exit visual", show=False),
         Binding("c", "commit_entries", "Commit"),
+        Binding("l", "show_log_screen", "Logs"),
         Binding("question_mark", "show_help", "Help", key_display="?"),
         Binding("enter", "diff_entry", "Diff"),
         Binding("d", "diff_entry", "Diff"),
@@ -789,6 +1644,10 @@ class SvnTui(App[None]):
     def action_show_help(self) -> None:
         self.waiting_for_second_g = False
         self.push_screen(HelpDialog())
+
+    def action_show_log_screen(self) -> None:
+        self.waiting_for_second_g = False
+        self.push_screen(LogScreen(self.client))
 
     def action_diff_entry(self) -> None:
         self.waiting_for_second_g = False
@@ -1208,11 +2067,65 @@ def parse_svn_status_line(line: str, root: Path) -> SvnStatusEntry | None:
     )
 
 
+def parse_svn_log_xml(xml_text: str) -> list[SvnLogEntry]:
+    root = ET.fromstring(xml_text)
+    entries: list[SvnLogEntry] = []
+    for element in root.findall("logentry"):
+        revision = element.attrib.get("revision", "")
+        author = (element.findtext("author") or "").strip() or "-"
+        date = format_log_date(element.findtext("date") or "")
+        message = (element.findtext("msg") or "").strip()
+        changed_paths: list[SvnLogPathEntry] = []
+        for path_element in element.findall("./paths/path"):
+            action = path_element.attrib.get("action", "?")
+            node_kind = path_element.attrib.get("kind", "")
+            path_text = (path_element.text or "").strip()
+            if path_text:
+                changed_paths.append(
+                    SvnLogPathEntry(
+                        action=action,
+                        node_kind=node_kind,
+                        path=path_text,
+                    )
+                )
+        entries.append(
+            SvnLogEntry(
+                revision=revision,
+                author=author,
+                date=date,
+                message=message,
+                changed_paths=changed_paths,
+            )
+        )
+    return entries
+
+
+def format_log_date(value: str) -> str:
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value.replace("T", " ")[:16]
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
 def relative_path(path: Path, root: Path) -> Path:
     try:
         return path.relative_to(root)
     except ValueError:
         return path
+
+
+def repo_relative_path(path_text: str, target_repo_path: str) -> str:
+    normalized_root = target_repo_path.rstrip("/")
+    if not normalized_root or normalized_root == path_text:
+        return path_text.lstrip("/") or "."
+    prefix = f"{normalized_root}/"
+    if path_text.startswith(prefix):
+        relative = path_text[len(prefix) :]
+        return relative or "."
+    return path_text.lstrip("/") or "."
 
 
 def format_status_row(
@@ -1248,6 +2161,67 @@ def format_status_row(
     return row
 
 
+def format_log_row(entry: SvnLogEntry, row_width: int = 0) -> Text:
+    summary_width = log_summary_width(row_width)
+    row = Text()
+    row.append(f"{('r' + entry.revision):<{LOG_REVISION_WIDTH}}", style="bold cyan")
+    row.append(" ")
+    row.append(f"{entry.author:<{LOG_AUTHOR_WIDTH}}", style="green")
+    row.append(" ")
+    row.append(f"{entry.date:<{LOG_DATE_WIDTH}}", style="dim")
+    row.append(" ")
+    row.append(end_truncate(entry.summary, summary_width))
+    return row
+
+
+def format_log_path_row(
+    path_entry: SvnLogPathEntry,
+    shown_path: str,
+    row_width: int = 0,
+    is_highlighted: bool = False,
+    path_scroll_offset: int = 0,
+) -> Text:
+    path_width = log_path_width(row_width)
+    row = Text()
+    row.append(f"{path_entry.action:<{LOG_ACTION_WIDTH}}", style=log_action_style(path_entry.action))
+    row.append(" ")
+    row.append(
+        fit_path_label(
+            shown_path,
+            path_width,
+            is_highlighted,
+            path_scroll_offset,
+        )
+    )
+    row.append(" ")
+    row.append(f"{log_kind_label(path_entry):<{LOG_KIND_WIDTH}}", style=log_kind_style(path_entry))
+    return row
+
+
+def format_log_header(row_width: int = 0) -> Text:
+    summary_width = log_summary_width(row_width)
+    header = Text()
+    header.append(f"{'Rev':<{LOG_REVISION_WIDTH}}", style="bold")
+    header.append(" ")
+    header.append(f"{'Author':<{LOG_AUTHOR_WIDTH}}", style="bold")
+    header.append(" ")
+    header.append(f"{'Date':<{LOG_DATE_WIDTH}}", style="bold")
+    header.append(" ")
+    header.append(f"{'Summary':<{summary_width}}", style="bold")
+    return header
+
+
+def format_log_path_header(row_width: int = 0) -> Text:
+    path_width = log_path_width(row_width)
+    header = Text()
+    header.append(f"{'Act':<{LOG_ACTION_WIDTH}}", style="bold")
+    header.append(" ")
+    header.append(f"{'Path':<{path_width}}", style="bold")
+    header.append(" ")
+    header.append(f"{'Type':<{LOG_KIND_WIDTH}}", style="bold")
+    return header
+
+
 def format_status_header(row_width: int = 0) -> Text:
     path_width = path_column_width(row_width)
     header = Text()
@@ -1270,6 +2244,20 @@ def path_column_width(row_width: int) -> int:
         + SIZE_COLUMN_WIDTH
         + 3
     )
+    if row_width <= fixed_width:
+        return PATH_COLUMN_MIN_WIDTH
+    return max(PATH_COLUMN_MIN_WIDTH, row_width - fixed_width)
+
+
+def log_summary_width(row_width: int) -> int:
+    fixed_width = LOG_REVISION_WIDTH + LOG_AUTHOR_WIDTH + LOG_DATE_WIDTH + 3
+    if row_width <= fixed_width:
+        return PATH_COLUMN_MIN_WIDTH
+    return max(PATH_COLUMN_MIN_WIDTH, row_width - fixed_width)
+
+
+def log_path_width(row_width: int) -> int:
+    fixed_width = LOG_ACTION_WIDTH + LOG_KIND_WIDTH + 2
     if row_width <= fixed_width:
         return PATH_COLUMN_MIN_WIDTH
     return max(PATH_COLUMN_MIN_WIDTH, row_width - fixed_width)
@@ -1304,6 +2292,17 @@ def middle_truncate(value: str, width: int) -> str:
     return value[:head_width] + marker + value[-tail_width:]
 
 
+def end_truncate(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return f"{value:<{width}}"
+    marker = "..."
+    if width <= len(marker):
+        return value[:width]
+    return f"{value[: width - len(marker)]}{marker}"
+
+
 def scroll_path_label(path_text: str, width: int, scroll_offset: int) -> str:
     if width <= 0:
         return ""
@@ -1325,6 +2324,7 @@ def format_help_text() -> Text:
     shortcuts = [
         ("?", "Open this help dialog"),
         ("Esc", "Close dialogs or exit visual select mode"),
+        ("l", "Open the recent log screen for the current target"),
         ("q", "Quit"),
         ("r", "Refresh SVN status"),
         ("Space", "Check or uncheck the current entry"),
@@ -1340,6 +2340,7 @@ def format_help_text() -> Text:
         ("Ctrl+e / Ctrl+y", "Scroll preview down or up one line"),
         ("Ctrl+d / Ctrl+u", "Scroll preview down or up half a page"),
         ("Shift+Right / Shift+Left", "Scroll preview horizontally"),
+        ("Ctrl+l", "Return from the recent log screen"),
     ]
     for key, description in shortcuts:
         help_text.append(f"{key:<24}", style="bold cyan")
@@ -1350,6 +2351,26 @@ def format_help_text() -> Text:
 def status_style(entry: SvnStatusEntry, theme: StatusTheme) -> str:
     status = first_status_char(entry)
     return theme.status_styles.get(status, theme.default_status_style)
+
+
+def log_action_style(action: str) -> str:
+    return DEFAULT_THEME.status_styles.get(action[:1], DEFAULT_THEME.default_status_style)
+
+
+def log_kind_label(path_entry: SvnLogPathEntry) -> str:
+    if path_entry.node_kind == "dir":
+        return "D"
+    if path_entry.node_kind == "file":
+        return "F"
+    return "?"
+
+
+def log_kind_style(path_entry: SvnLogPathEntry) -> str:
+    if path_entry.node_kind == "dir":
+        return "cyan"
+    if path_entry.node_kind == "file":
+        return "green"
+    return "dim"
 
 
 def first_status_char(entry: SvnStatusEntry) -> str:
@@ -1572,6 +2593,17 @@ def drain_line(file: object, cancel_token: PreviewCancelToken) -> bool:
         chunk = file.readline(PREVIEW_MAX_LINE_BYTES)
         if chunk == b"" or chunk.endswith(b"\n"):
             return True
+
+
+def dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def parse_args() -> argparse.Namespace:

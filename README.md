@@ -2,7 +2,7 @@
 
 一个基于 [Textual](https://textual.textualize.io/) 的 SVN TUI 客户端原型。
 
-当前目标是快速查看指定工作副本路径下的 `svn st` 结果，逐个检查文件变更，用 `nvim -d` 打开 diff，并提交勾选的文件。
+当前目标是快速查看指定工作副本路径下的 `svn st` 结果，逐个检查文件变更，用 `nvim -d` 打开 diff，并提交勾选的文件；同时可以直接查看仓库最近日志与对应 diff。
 
 ## Requirements
 
@@ -39,6 +39,10 @@ python main.py
 - 输入提交信息后提交勾选的文件。
 - 用 `nvim -d` 检查变更。
 - 右侧提供文件预览。
+- 主界面按 `l` 打开最近日志全屏界面。
+- 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
+- 日志界面支持查看 revision 列表、提交说明、变更路径列表，以及单文件历史 diff 预览。
+- 日志界面支持在日志列表弹出操作菜单，并复制 revision / author / message 到剪贴板。
 - SVN 状态读取使用异步子进程，避免阻塞 TUI 主循环。
 - 预览使用 debounce，停止移动 200ms 后才加载。
 - 预览使用单后台任务、可取消索引和虚拟滚动。
@@ -60,11 +64,55 @@ python main.py
 | `Esc` | 退出范围多选模式，或在弹窗中取消 / 关闭 |
 | `Enter` / `d` | 打开当前条目的 `nvim -d` |
 | `b` | 用只读 `nvim` 打开当前条目的 `svn blame` |
+| `l` | 打开最近日志界面 |
 | `r` | 刷新 `svn st` |
 | `Ctrl-e` / `Ctrl-y` | 预览向下 / 向上滚动一行 |
 | `Ctrl-d` / `Ctrl-u` | 预览向下 / 向上滚动半页 |
 | `Shift-Right` / `Shift-Left` | 预览横向滚动 |
 | `q` | 退出 |
+
+## Log View
+
+日志界面为全屏三栏布局：
+
+- 左上：最近日志列表
+- 中左：当前日志的完整 message
+- 左下：当前日志的变更路径列表
+- 右侧：当前路径的历史 diff 预览
+
+进入日志界面后会先立即切屏，再异步加载日志内容。
+
+### Log Shortcuts
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-l` | 返回主界面 |
+| `Tab` | 在左上日志列表和左下变更路径列表之间切换焦点 |
+| `j` / `k` | 在当前聚焦列表中上下移动 |
+| `Ctrl-f` / `Ctrl-b` | 当前聚焦列表翻页 |
+| `p` | 在日志列表当前项旁打开操作浮窗 |
+| `L` | 在浮窗的 `copy >` 项上进入右侧子菜单 |
+| `Enter` | 触发当前浮窗项；在 copy 子菜单中复制字段 |
+| `Esc` | 关闭浮窗；若当前在 copy 子菜单，则先只关闭子菜单 |
+| `Ctrl-e` / `Ctrl-y` | diff 预览向下 / 向上滚动一行 |
+| `Ctrl-d` / `Ctrl-u` | diff 预览向下 / 向上滚动半页 |
+| `Shift-Right` / `Shift-Left` | diff 预览横向滚动 |
+
+### Log Popup Menu
+
+日志列表按 `p` 后会弹出操作菜单：
+
+- `revert to this`
+- `revert changes from`
+- `copy >`
+
+其中：
+
+- `revert to this` 和 `revert changes from` 当前只展示触发提示，尚未真正执行 SVN 回退。
+- `copy >` 可进一步复制：
+  - `revision`
+  - `author`
+  - `message`
 
 ## Preview
 
@@ -91,3 +139,4 @@ nvim -d base-file working-file
 - 对未版本控制或无法取得 BASE 的文件，会直接使用 `nvim <file>` 打开。
 - 二进制文件不会预览。
 - 超长行会截断显示。
+- 日志变更路径列表中的 `Type` 使用 `F` / `D` 区分文件和目录。
