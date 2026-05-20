@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from copy import copy
 
 from rich.segment import Segment
 from rich.style import Style
@@ -339,7 +340,7 @@ class OverlayMenuItem(ListItem):
     def __init__(
         self,
         option_id: str,
-        label_text: str,
+        label_text: str | Text,
         *,
         has_submenu: bool = False,
     ) -> None:
@@ -349,7 +350,13 @@ class OverlayMenuItem(ListItem):
         self.has_submenu = has_submenu
 
     def compose(self) -> ComposeResult:
+        label_text = self.label_text
         if self.has_submenu:
-            yield Label(f"{self.label_text:<20}>")
+            if isinstance(label_text, Text):
+                submenu_text = copy(label_text)
+                submenu_text.append(">")
+                yield Label(submenu_text)
+                return
+            yield Label(Text(f"{label_text:<20}>"))
             return
-        yield Label(self.label_text)
+        yield Label(copy(label_text) if isinstance(label_text, Text) else Text(label_text))

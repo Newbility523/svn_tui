@@ -24,6 +24,7 @@ from svn_tui.ui.formatters import (
     format_log_path_header,
     format_search_label,
 )
+from svn_tui.ui.navigation import NavigationBar
 from svn_tui.ui.search import find_list_match, list_match_position, log_row_search_text
 from svn_tui.ui.widgets import (
     LogEntryRow,
@@ -61,6 +62,7 @@ class LogScreen(Screen[None]):
     def __init__(self, client: SvnClient) -> None:
         super().__init__()
         self.client = client
+        self.navigation_bar = NavigationBar()
         self.log_list_header = Static(id="log-list-header")
         self.log_list = ListView(id="log-list")
         self.log_search_label = Static(id="log-search-label")
@@ -99,6 +101,7 @@ class LogScreen(Screen[None]):
         self.search_list: ListView | None = None
 
     def compose(self) -> ComposeResult:
+        yield self.navigation_bar
         yield Static(
             f"Recent Log  {self.client.display_root}",
             id="log-banner",
@@ -129,6 +132,7 @@ class LogScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self.log_list.focus()
+        self.refresh_navigation_bar()
         self.refresh_layout()
         self.set_interval(PATH_SCROLL_SECONDS, self.tick_path_scroll)
         self.preview_title.update("Diff Preview")
@@ -140,6 +144,13 @@ class LogScreen(Screen[None]):
         self.file_search.display = False
         self.refresh_search_lines()
         self.load_logs_task = asyncio.create_task(self.load_logs())
+
+    def on_screen_resume(self, event: object) -> None:
+        del event
+        self.refresh_navigation_bar()
+
+    def refresh_navigation_bar(self) -> None:
+        self.navigation_bar.refresh_from_screens(self.app.screen_stack)
 
     def on_resize(self, event: object) -> None:
         del event

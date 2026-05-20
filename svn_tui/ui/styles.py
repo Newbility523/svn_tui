@@ -6,6 +6,12 @@ APP_CSS = """
         layout: vertical;
     }
 
+    NavigationBar {
+        width: 1fr;
+        height: 1;
+        background: $panel;
+    }
+
     #content {
         height: 1fr;
     }
@@ -134,6 +140,10 @@ APP_CSS = """
         layers: base overlay;
     }
 
+    StatusScreen {
+        layers: base overlay;
+    }
+
     #log-banner {
         height: 1;
         padding: 0 1;
@@ -251,6 +261,30 @@ APP_CSS = """
         border: solid $primary;
     }
 
+    #status-action-popup {
+        layer: overlay;
+        position: absolute;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #status-action-title {
+        height: 1;
+        width: 1fr;
+        padding: 0 1;
+        background: $primary;
+        color: $text;
+        text-style: bold;
+        content-align: center middle;
+    }
+
+    #status-action-menu {
+        width: 1fr;
+        border: none;
+        background: $surface;
+        scrollbar-visibility: hidden;
+    }
+
     #log-action-menu {
         width: 24;
         height: 5;
@@ -262,10 +296,7 @@ APP_CSS = """
     }
 
     LogEntryRow,
-    LogPathRow {
-        height: 1;
-    }
-
+    LogPathRow,
     OverlayMenuItem {
         height: 1;
     }

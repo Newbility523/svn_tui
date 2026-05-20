@@ -18,8 +18,16 @@ python3 -m pip install -r requirements.txt
 
 ## Quick Start
 
+默认打开状态界面：
+
 ```bash
 python3 main.py /path/to/svn/working-copy
+```
+
+也可以使用包入口：
+
+```bash
+python3 -m svn_tui /path/to/svn/working-copy
 ```
 
 如果不传路径，默认使用当前目录：
@@ -28,7 +36,35 @@ python3 main.py /path/to/svn/working-copy
 python3 main.py
 ```
 
+显式选择初始界面：
+
+```bash
+python3 main.py status /path/to/item
+python3 main.py log /path/to/item
+python3 main.py --screen log /path/to/item
+```
+
+`status` 接收文件路径时，会自动改用该文件所在目录作为目标，便于从文件管理器选中文件后查看同目录状态。`log` 接收文件路径时会保留文件目标，用于直接查看该文件的历史日志。
+
 列表中的路径相对传入的打开路径显示。例如打开 `a/b/c` 时，文件 `a/b/c/d.py` 会显示为 `d.py`。
+
+## Ranger Integration
+
+`svn-tui` 不能嵌入 ranger 进程内部。推荐做法是在 ranger 快捷键中启动外部 TUI，退出 `svn-tui` 后自然回到 ranger。
+
+示例 `~/.config/ranger/rc.conf`：
+
+```text
+map zs shell python3 -m svn_tui status %f
+map zl shell python3 -m svn_tui log %f
+```
+
+如果使用当前仓库而不是安装后的包入口，可以写成：
+
+```text
+map zs shell python3 /path/to/svn_tui/main.py status %f
+map zl shell python3 /path/to/svn_tui/main.py log %f
+```
 
 ## Documentation
 
@@ -41,6 +77,7 @@ python3 main.py
 项目已按后续多界面扩展拆成包结构：
 
 - `main.py`：兼容入口，只调用包内 CLI。
+- `svn_tui/__main__.py`：支持 `python3 -m svn_tui` 入口。
 - `svn_tui/cli.py`：命令行参数解析和启动。
 - `svn_tui/app.py`：Textual App 外壳和全局快捷键。
 - `svn_tui/config.py`：预览、列表列宽、日志数量、滚动间隔、主题等全局配置。
@@ -72,11 +109,13 @@ python3 main.py
 - 按状态和文件类型给列表项着色。
 - 显示文件扩展名和大小。
 - 用空格将条目标记进提交列表。
-- 输入提交信息后提交勾选的文件。
+- 通过批量操作菜单输入提交信息并提交勾选的文件。
 - 用 `nvim -d` 检查变更。
 - 右侧提供文件预览。
 - 主界面按 `l` 打开最近日志全屏界面。
+- 状态列表按 `z` 打开当前条目的操作菜单，按 `Z` 打开勾选条目或当前目录的操作菜单。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
+- CLI 支持直接打开 status 或 log 初始界面，方便 ranger 等外部工具调用。
 - 日志界面支持查看 revision 列表、提交说明、变更路径列表，以及单文件历史 diff 预览。
 - 日志列表中的 revision 直接显示数字，不添加 `r` 前缀。
 - 日志界面支持在当前日志行右侧弹出操作菜单，并复制 revision / author / message 到剪贴板。
@@ -107,18 +146,42 @@ python3 main.py
 | `Space` | 勾选 / 取消勾选当前条目 |
 | `v` | 进入范围多选模式 |
 | `Space` | 在范围多选模式中反选范围内每个条目 |
-| `c` | 打开提交信息弹窗 |
 | `Ctrl-Enter` | 在提交弹窗中确认提交 |
 | `Esc` | 退出范围多选模式，或在弹窗中取消 / 关闭 |
 | `Enter` / `d` | 打开当前条目的 `nvim -d` |
 | `b` | 用只读 `nvim` 打开当前条目的 `svn blame` |
 | `l` | 打开最近日志界面 |
+| `z` | 打开当前条目的操作菜单 |
+| `Z` | 打开勾选条目的操作菜单；没有勾选时显示目录级操作，勾选一个条目时等同于当前条目菜单 |
 | `/` | 显示并聚焦状态列表下方的搜索栏 |
 | `n` / `N` | 跳到下一个 / 上一个搜索匹配 |
 | `r` | 刷新 `svn st` |
 | `Ctrl-e` / `Ctrl-y` | 预览向下 / 向上滚动一行 |
 | `Ctrl-d` / `Ctrl-u` | 预览向下 / 向上滚动半页 |
 | `Shift-Right` / `Shift-Left` | 预览横向滚动 |
+
+### Status Popup Menu
+
+状态列表按 `z` 后会在当前条目旁打开操作菜单。菜单打开时，菜单快捷键优先于 Status 界面快捷键：
+
+- `l/L   Log`：打开当前条目的日志界面。
+- `b/B   Blame`：用只读 `nvim` 打开当前条目的 `svn blame`。
+- `d/D   Diff Base`：用 `nvim -d` 对比 `BASE` 与工作副本。
+- `h/H   Diff Head`：用 `nvim -d` 对比 `HEAD` 与工作副本。
+- `y/Y   Copy`：复制当前条目的完整本地路径。
+- `u     Update`：执行 `svn update -- <path>`，完成后刷新状态列表。
+- `r     Revert`：执行 `svn revert -- <path>`，完成后刷新状态列表。
+
+按 `Z` 会对勾选条目打开操作菜单。未勾选任何条目时只显示目录级操作；只勾选一个条目时显示与 `z` 相同的单条目菜单；勾选多个条目时显示批量操作和目录级操作：
+
+- `u     Update`：批量执行 `svn update -- <paths>`。
+- `c     Commit`：打开提交信息弹窗并提交勾选条目。
+- `r     Revert`：批量执行 `svn revert -- <paths>`。
+- `y/Y   Copy`：复制所有勾选条目的完整本地路径，每行一个。
+- `U     Update this Directory`：对当前 Status 目录执行 `svn update -- <directory>`。
+- `R     Revert this Directory`：对当前 Status 目录执行 `svn revert -- <directory>`。
+
+菜单内 `j` / `k` 移动，`Enter` 触发当前菜单项，`Esc` 关闭菜单。
 
 ## Log View
 
@@ -210,7 +273,7 @@ nvim -d base-file working-file
 常用验证命令：
 
 ```bash
-python3 -m compileall main.py svn_tui
+python3 -m compileall main.py svn_tui tests
 python3 main.py --help
 ```
 

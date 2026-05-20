@@ -20,19 +20,19 @@
 
 ### 待办拆分
 
-- [ ] CLI 支持显式选择初始界面。
+- [x] CLI 支持显式选择初始界面。
   - 例：`python3 main.py status /path/to/item`
   - 例：`python3 main.py log /path/to/item`
   - 或：`python3 main.py --screen status /path/to/item`
-- [ ] `SvnTui` 支持接收初始 Screen 类型，而不是固定进入 `StatusScreen`。
-- [ ] `LogScreen` 支持从 CLI 直接作为首屏打开。
-- [ ] 增加一个稳定的命令入口名称，方便 ranger 配置调用。
-  - 后续可以考虑 `python -m svn_tui` 或 console script。
-- [ ] 编写 ranger 集成示例配置。
+- [x] `SvnTui` 支持接收初始 Screen 类型，而不是固定进入 `StatusScreen`。
+- [x] `LogScreen` 支持从 CLI 直接作为首屏打开。
+- [x] 增加一个稳定的命令入口名称，方便 ranger 配置调用。
+  - 当前支持 `python3 -m svn_tui`。
+- [x] 编写 ranger 集成示例配置。
   - status：把 ranger 当前选中文件或目录传给状态界面。
   - log：把 ranger 当前选中文件或目录传给日志界面。
 - [ ] 编写 tmux popup 集成示例配置。
-- [ ] 文档说明 Textual 不能真正嵌入 ranger，只能通过外部 TUI 或 tmux popup 方式联动。
+- [x] 文档说明 Textual 不能真正嵌入 ranger，只能通过外部 TUI 方式联动。
 - [ ] 验证从 ranger 进入 `svn-tui` 后退出能正常返回 ranger。
 
 ### 设计约束
@@ -49,4 +49,4 @@
 - 从 ranger 选中文件或目录后可以直接打开 log 界面。
 - 在 `svn-tui` 中按退出键后返回 ranger。
 - status/log 界面的现有快捷键和预览行为不受影响。
-- 文档包含普通终端调用、ranger 配置示例、tmux popup 配置示例。
+- 文档包含普通终端调用和 ranger 配置示例；tmux popup 配置示例保留为后续待办。

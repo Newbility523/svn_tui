@@ -37,6 +37,20 @@ python3 main.py
 python3 main.py /path/to/svn/working-copy
 ```
 
+显式选择初始界面：
+
+```bash
+python3 main.py status /path/to/item
+python3 main.py log /path/to/item
+python3 main.py --screen log /path/to/item
+```
+
+使用包入口：
+
+```bash
+python3 -m svn_tui status /path/to/item
+```
+
 只检查 CLI 入口：
 
 ```bash
@@ -45,17 +59,19 @@ python3 main.py --help
 
 ## 验证命令
 
-当前项目还没有测试套件，提交前至少运行：
+提交前至少运行：
 
 ```bash
-python3 -m compileall main.py svn_tui
+python3 -m unittest discover
+python3 -m compileall main.py svn_tui tests
 python3 main.py --help
 ```
 
 如果使用项目虚拟环境：
 
 ```bash
-.venv/bin/python -m compileall main.py svn_tui
+.venv/bin/python -m unittest discover
+.venv/bin/python -m compileall main.py svn_tui tests
 .venv/bin/python main.py --help
 ```
 
@@ -107,7 +123,7 @@ Screen 可以依赖 services，services 不应依赖 Screen 或 Widget。这样�
 ```bash
 git status --short
 git diff --stat
-python3 -m compileall main.py svn_tui
+python3 -m compileall main.py svn_tui tests
 python3 main.py --help
 ```
 
@@ -115,7 +131,7 @@ python3 main.py --help
 
 ## 已知限制
 
-- 回退相关菜单项目前只展示提示，尚未执行 SVN 回退。
+- 状态菜单的目录级更新 / 还原操作直接作用于当前 Status 目录，使用前应确认工作副本范围。
 - 交互式 diff 和 blame 依赖外部 Neovim。
 - 二进制文件不会做文本预览。
 - 超大文件只做前缀预览，避免 TUI 卡顿。

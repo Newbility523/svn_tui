@@ -34,6 +34,18 @@ def build_svn_commit_args(message: str, paths: list[Path]) -> list[str]:
     return ["svn", "commit", "-m", message, "--", *(str(path) for path in paths)]
 
 
+def build_svn_update_args(paths: list[Path]) -> list[str]:
+    return ["svn", "update", "--", *(str(path) for path in paths)]
+
+
+def build_svn_revert_args(paths: list[Path]) -> list[str]:
+    return ["svn", "revert", "--", *(str(path) for path in paths)]
+
+
+def build_svn_cat_args(path: Path, revision: str) -> list[str]:
+    return ["svn", "cat", "-r", revision, str(path)]
+
+
 class SvnClient:
     def __init__(self, target: Path) -> None:
         self.target = target.expanduser().resolve()
@@ -67,6 +79,15 @@ class SvnClient:
 
     async def commit(self, message: str, paths: list[Path]) -> str:
         return await run_command_text(build_svn_commit_args(message, paths))
+
+    async def update_paths(self, paths: list[Path]) -> str:
+        return await run_command_text(build_svn_update_args(paths))
+
+    async def update_path(self, path: Path) -> str:
+        return await self.update_paths([path])
+
+    async def revert_paths(self, paths: list[Path]) -> str:
+        return await run_command_text(build_svn_revert_args(paths))
 
     async def ensure_repository_metadata(self) -> None:
         if self.repo_info_loaded:
@@ -157,20 +178,26 @@ class SvnClient:
         return None
 
     def open_diff(self, entry: SvnStatusEntry) -> None:
+        self.open_diff_against_revision(entry, "BASE")
+
+    def open_diff_head(self, entry: SvnStatusEntry) -> None:
+        self.open_diff_against_revision(entry, "HEAD")
+
+    def open_diff_against_revision(self, entry: SvnStatusEntry, revision: str) -> None:
         if entry.text_status in {"?", "I"}:
             subprocess.run(["nvim", str(entry.path)])
             return
 
         with tempfile.NamedTemporaryFile(
             mode="w+b",
-            prefix=f"svn-base-{entry.path.name}-",
+            prefix=f"svn-{revision.lower()}-{entry.path.name}-",
             delete=False,
         ) as base_file:
             base_path = Path(base_file.name)
 
         try:
             cat = subprocess.run(
-                ["svn", "cat", "-r", "BASE", str(entry.path)],
+                build_svn_cat_args(entry.path, revision),
                 check=False,
                 capture_output=True,
             )

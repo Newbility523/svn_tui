@@ -9,7 +9,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
+from textual.widgets import Footer, Input, Label, ListItem, ListView, Static
 
 from svn_tui.config import (
     DEFAULT_THEME,
@@ -17,6 +17,7 @@ from svn_tui.config import (
     PATH_SCROLL_SEPARATOR,
     PREVIEW_DEBOUNCE_SECONDS,
     PREVIEW_ENABLED,
+    STATUS_ACTION_MENU_WIDTH,
 )
 from svn_tui.models import SvnStatusEntry
 from svn_tui.services.preview import (
@@ -37,24 +38,40 @@ from svn_tui.ui.formatters import (
     format_status_header,
     status_style,
 )
+from svn_tui.ui.navigation import NavigationBar
 from svn_tui.ui.screens.log import LogScreen
 from svn_tui.ui.search import find_list_match, list_match_position, status_row_search_text
-from svn_tui.ui.widgets import PreviewView, StatusRow
+from svn_tui.ui.status_actions import (
+    BATCH_STATUS_ACTIONS,
+    DIRECTORY_STATUS_ACTIONS,
+    SINGLE_STATUS_ACTIONS,
+    StatusAction,
+    status_action_for_key,
+)
+from svn_tui.ui.widgets import OverlayMenuItem, PreviewView, StatusRow
 from svn_tui.utils.paths import relative_path
 
 
 class StatusScreen(Screen[None]):
     BINDINGS = [
         Binding("r", "refresh_status", "Refresh"),
+        Binding("z", "open_status_action_menu", "Actions"),
+        Binding("Z", "open_checked_action_menu", "Checked actions"),
         Binding("space", "toggle_entry", "Stage"),
         Binding("v", "visual_select", "Visual"),
         Binding("escape", "exit_visual_select", "Exit visual", show=False),
-        Binding("c", "commit_entries", "Commit"),
+        Binding("c", "commit_entries", "Commit", show=False),
         Binding("l", "show_log_screen", "Logs"),
         Binding("question_mark", "show_help", "Help", key_display="?"),
-        Binding("enter", "diff_entry", "Diff"),
+        Binding("enter", "activate_or_diff_entry", "Diff"),
         Binding("d", "diff_entry", "Diff"),
+        Binding("h", "diff_head_entry", "Diff Head", show=False),
         Binding("b", "blame_entry", "Blame"),
+        Binding("u", "update_entry", "Update", show=False),
+        Binding("U", "update_directory_entry", "Update directory", show=False),
+        Binding("y", "copy_entry", "Copy", show=False),
+        Binding("Y", "copy_entry", "Copy", show=False),
+        Binding("R", "revert_directory_entry", "Revert directory", show=False),
         Binding("slash", "search", "Search", key_display="/"),
         Binding("n", "search_next", "Next", show=False),
         Binding("N", "search_previous", "Previous", show=False),
@@ -76,8 +93,12 @@ class StatusScreen(Screen[None]):
         super().__init__()
         self.client = SvnClient(target)
         self.entries: list[SvnStatusEntry] = []
+        self.navigation_bar = NavigationBar()
         self.status_header = Static(format_status_header(), id="status-header")
         self.list_view = ListView(id="status-list")
+        self.status_action_popup = Vertical(id="status-action-popup")
+        self.status_action_title = Static(id="status-action-title")
+        self.status_action_menu = ListView(id="status-action-menu")
         self.search_label = Static(id="status-search-label")
         self.search_input = Input(id="status-search", compact=True)
         self.detail = Static(id="details")
@@ -96,9 +117,11 @@ class StatusScreen(Screen[None]):
         self.waiting_for_second_g = False
         self.search_query = ""
         self.search_match: tuple[int, int] | None = None
+        self.status_action_rows: list[StatusRow] = []
+        self.status_action_actions: list[StatusAction] = []
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield self.navigation_bar
         with Horizontal(id="content"):
             with Vertical(id="main"):
                 yield self.status_header
@@ -109,16 +132,200 @@ class StatusScreen(Screen[None]):
             with Vertical(id="side"):
                 yield Static("Preview", id="preview-title")
                 yield self.preview
+        with self.status_action_popup:
+            yield self.status_action_title
+            yield self.status_action_menu
         yield Footer()
 
     async def on_mount(self) -> None:
         self.app.title = "svn-tui"
         self.app.sub_title = str(self.client.target)
+        self.refresh_navigation_bar()
+        self.status_action_popup.display = False
         self.set_interval(PATH_SCROLL_SECONDS, self.tick_path_scroll)
         self.refresh_search_line()
         await self.load_status()
 
+    def on_screen_resume(self, event: object) -> None:
+        del event
+        self.refresh_navigation_bar()
+
+    def refresh_navigation_bar(self) -> None:
+        self.navigation_bar.refresh_from_screens(self.app.screen_stack)
+
+    @property
+    def status_action_menu_open(self) -> bool:
+        return bool(self.status_action_popup.display)
+
+    async def action_open_status_action_menu(self) -> None:
+        self.waiting_for_second_g = False
+        row = self.current_row()
+        if row is None:
+            return
+        await self.open_status_action_menu([row], SINGLE_STATUS_ACTIONS)
+
+    async def action_open_checked_action_menu(self) -> None:
+        self.waiting_for_second_g = False
+        rows = self.selected_rows()
+        if not rows:
+            await self.open_status_action_menu([], DIRECTORY_STATUS_ACTIONS)
+            return
+        actions = SINGLE_STATUS_ACTIONS if len(rows) == 1 else BATCH_STATUS_ACTIONS
+        await self.open_status_action_menu(rows, actions)
+
+    async def open_status_action_menu(
+        self,
+        rows: list[StatusRow],
+        actions: list[StatusAction],
+    ) -> None:
+        self.status_action_rows = rows
+        self.status_action_actions = actions
+        self.status_action_title.update(self.status_action_title_for_rows(rows))
+        await self.status_action_menu.clear()
+        await self.status_action_menu.extend(
+            OverlayMenuItem(action.option_id, action.menu_text)
+            for action in actions
+        )
+        self.status_action_popup.styles.width = STATUS_ACTION_MENU_WIDTH
+        self.status_action_popup.styles.height = self.status_action_popup_height()
+        self.status_action_menu.styles.height = len(actions)
+        self.position_status_action_menu(rows[0] if rows else None)
+        self.status_action_popup.display = True
+        self.status_action_menu.index = 0
+        self.status_action_menu.focus()
+
+    def hide_status_action_menu(self) -> None:
+        self.status_action_popup.display = False
+        self.status_action_rows = []
+        self.status_action_actions = []
+        self.list_view.focus()
+
+    def status_action_title_for_rows(self, rows: list[StatusRow]) -> str:
+        if not rows:
+            return "Directory"
+        if len(rows) != 1:
+            return "Multi"
+        return rows[0].entry.path.name or str(rows[0].entry.path)
+
+    def status_action_popup_height(self) -> int:
+        return max(4, len(self.status_action_actions) + 3)
+
+    def position_status_action_menu(self, row: StatusRow | None = None) -> None:
+        row = row or self.current_row()
+        if row is not None and row.size.width:
+            row_right = row.region.x + row.size.width
+            row_top = row.region.y
+        else:
+            row_index = self.list_view.index or 0
+            visible_y = max(0, row_index - int(self.list_view.scroll_y))
+            row_right = self.list_view.region.x + self.list_view.size.width
+            row_top = self.list_view.region.y + visible_y
+
+        x = min(self.size.width - STATUS_ACTION_MENU_WIDTH, row_right)
+        y = min(self.size.height - self.status_action_popup_height(), row_top)
+        self.status_action_popup.styles.offset = (max(0, x), max(0, y))
+
+    def current_status_action_item(self) -> OverlayMenuItem | None:
+        highlighted = self.status_action_menu.highlighted_child
+        if isinstance(highlighted, OverlayMenuItem):
+            return highlighted
+        if (
+            self.status_action_menu.index is None
+            or self.status_action_menu.index >= len(self.status_action_menu.children)
+        ):
+            return None
+        indexed = self.status_action_menu.children[self.status_action_menu.index]
+        return indexed if isinstance(indexed, OverlayMenuItem) else None
+
+    def activate_current_status_action(self) -> None:
+        item = self.current_status_action_item()
+        if item is None:
+            return
+        self.activate_status_action(item.option_id)
+
+    def activate_status_action_hotkey(self, key: str) -> bool:
+        if not self.status_action_menu_open:
+            return False
+        action = status_action_for_key(key, self.status_action_actions)
+        if action is None:
+            return False
+        self.activate_status_action(action.option_id)
+        return True
+
+    def activate_status_action(self, option_id: str) -> None:
+        rows = self.status_action_rows
+        if option_id == "update_directory":
+            self.hide_status_action_menu()
+            asyncio.create_task(
+                self.update_paths(
+                    [self.status_directory_path()],
+                    "Updating this directory...",
+                    "svn update failed",
+                    "svn update",
+                )
+            )
+            return
+        if option_id == "revert_directory":
+            self.hide_status_action_menu()
+            asyncio.create_task(
+                self.revert_paths(
+                    [self.status_directory_path()],
+                    "Reverting this directory...",
+                    "svn revert failed",
+                    "svn revert",
+                )
+            )
+            return
+        if not rows:
+            self.hide_status_action_menu()
+            return
+        row = rows[0]
+
+        if option_id == "log":
+            self.hide_status_action_menu()
+            self.app.push_screen(LogScreen(SvnClient(row.entry.path)))
+            return
+        if option_id == "blame":
+            self.hide_status_action_menu()
+            with self.app.suspend():
+                error = self.client.open_blame(row.entry)
+            if error:
+                self.notify(error, title="svn blame failed", severity="warning")
+            return
+        if option_id == "diff_base":
+            self.hide_status_action_menu()
+            with self.app.suspend():
+                self.client.open_diff(row.entry)
+            return
+        if option_id == "diff_head":
+            self.hide_status_action_menu()
+            with self.app.suspend():
+                self.client.open_diff_head(row.entry)
+            return
+        if option_id == "copy":
+            self.hide_status_action_menu()
+            self.app.copy_to_clipboard("\n".join(str(row.entry.path) for row in rows))
+            self.notify(f"Copied {len(rows)} path(s).", title="clipboard")
+            return
+        if option_id == "update":
+            self.hide_status_action_menu()
+            asyncio.create_task(self.update_rows(rows))
+            return
+        if option_id == "commit":
+            self.hide_status_action_menu()
+            self.app.push_screen(
+                CommitMessageDialog(len(rows)),
+                lambda message: self.handle_commit_message(rows, message),
+            )
+            return
+        if option_id == "revert":
+            self.hide_status_action_menu()
+            asyncio.create_task(self.revert_rows(rows))
+            return
+
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.list_view is self.status_action_menu:
+            return
         row = event.item
         if isinstance(row, StatusRow):
             self.path_scroll_offset = 0
@@ -126,6 +333,11 @@ class StatusScreen(Screen[None]):
             self.refresh_search_line()
             self.update_detail(row)
             self.schedule_preview(row.entry)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view is self.status_action_menu and isinstance(event.item, OverlayMenuItem):
+            self.activate_status_action(event.item.option_id)
+            event.stop()
 
     def on_resize(self, event: object) -> None:
         del event
@@ -142,10 +354,15 @@ class StatusScreen(Screen[None]):
             self.preview_cancel_token.cancel()
 
     async def action_refresh_status(self) -> None:
+        if self.status_action_menu_open:
+            self.activate_status_action_hotkey("r")
+            return
         await self.load_status()
 
     def action_toggle_entry(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            return
         if self.visual_anchor_index is not None:
             rows = self.visual_rows()
             if not rows:
@@ -165,6 +382,8 @@ class StatusScreen(Screen[None]):
 
     def action_visual_select(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            return
         index = self.current_index()
         if index is None:
             return
@@ -173,6 +392,9 @@ class StatusScreen(Screen[None]):
         self.update_detail(self.current_row())
 
     def action_exit_visual_select(self) -> None:
+        if self.status_action_menu_open:
+            self.hide_status_action_menu()
+            return
         if self.visual_anchor_index is None:
             return
         self.visual_anchor_index = None
@@ -181,19 +403,8 @@ class StatusScreen(Screen[None]):
 
     def action_commit_entries(self) -> None:
         self.waiting_for_second_g = False
-        selected = self.selected_rows()
-        if not selected:
-            self.notify(
-                "Select files with Space before committing.",
-                title="nothing selected",
-                severity="warning",
-            )
+        if self.activate_status_action_hotkey("c"):
             return
-
-        self.app.push_screen(
-            CommitMessageDialog(len(selected)),
-            lambda message: self.handle_commit_message(selected, message),
-        )
 
     def handle_commit_message(
         self,
@@ -217,6 +428,8 @@ class StatusScreen(Screen[None]):
         self.app.push_screen(HelpDialog())
 
     def action_search(self) -> None:
+        if self.status_action_menu_open:
+            return
         self.waiting_for_second_g = False
         self.search_label.display = False
         self.search_input.value = self.search_query
@@ -296,18 +509,39 @@ class StatusScreen(Screen[None]):
 
     def action_show_log_screen(self) -> None:
         self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("L"):
+            return
         self.app.push_screen(LogScreen(self.client))
+
+    def action_activate_or_diff_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            self.activate_current_status_action()
+            return
+        self.open_diff_for_current_row()
 
     def action_diff_entry(self) -> None:
         self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("D"):
+            return
+        self.open_diff_for_current_row()
+
+    def open_diff_for_current_row(self) -> None:
         row = self.current_row()
         if row is None:
             return
         with self.app.suspend():
             self.client.open_diff(row.entry)
 
+    def action_diff_head_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("H"):
+            return
+
     def action_blame_entry(self) -> None:
         self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("B"):
+            return
         row = self.current_row()
         if row is None:
             return
@@ -316,8 +550,31 @@ class StatusScreen(Screen[None]):
         if error:
             self.notify(error, title="svn blame failed", severity="warning")
 
+    def action_update_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("u"):
+            return
+
+    def action_update_directory_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("U"):
+            return
+
+    def action_copy_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("y") or self.activate_status_action_hotkey("Y"):
+            return
+
+    def action_revert_directory_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("R"):
+            return
+
     def action_cursor_down(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            self.status_action_menu.action_cursor_down()
+            return
         self.list_view.action_cursor_down()
         self.refresh_search_line()
         if self.visual_anchor_index is not None:
@@ -326,6 +583,9 @@ class StatusScreen(Screen[None]):
 
     def action_cursor_up(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            self.status_action_menu.action_cursor_up()
+            return
         self.list_view.action_cursor_up()
         self.refresh_search_line()
         if self.visual_anchor_index is not None:
@@ -334,6 +594,9 @@ class StatusScreen(Screen[None]):
 
     def action_page_down(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            self.status_action_menu.action_page_down()
+            return
         self.list_view.action_page_down()
         self.refresh_search_line()
         if self.visual_anchor_index is not None:
@@ -342,6 +605,9 @@ class StatusScreen(Screen[None]):
 
     def action_page_up(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            self.status_action_menu.action_page_up()
+            return
         self.list_view.action_page_up()
         self.refresh_search_line()
         if self.visual_anchor_index is not None:
@@ -375,6 +641,8 @@ class StatusScreen(Screen[None]):
         self.preview.scroll_relative(x=-8, animate=False, immediate=True)
 
     def action_vim_g(self) -> None:
+        if self.status_action_menu_open:
+            return
         if self.waiting_for_second_g:
             self.waiting_for_second_g = False
             self.move_to_top()
@@ -384,6 +652,8 @@ class StatusScreen(Screen[None]):
 
     def action_list_bottom(self) -> None:
         self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            return
         if self.list_view.children:
             self.list_view.index = len(self.list_view.children) - 1
             self.refresh_search_line()
@@ -476,6 +746,87 @@ class StatusScreen(Screen[None]):
         commit_message = commit_success_message(output, len(paths))
         self.notify(commit_message, title="commit finished")
         await self.load_status()
+
+    async def update_rows(self, rows: list[StatusRow]) -> None:
+        paths = [row.entry.path for row in rows]
+        await self.update_paths(
+            paths,
+            f"Updating {len(paths)} path(s)...",
+            "svn update failed",
+            "svn update",
+        )
+
+    async def update_paths(
+        self,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        self.detail.update(Text(detail_text, style="dim"))
+        try:
+            output = await self.client.update_paths(paths)
+        except FileNotFoundError as exc:
+            self.notify(
+                f"command not found: {exc.filename}",
+                title="command failed",
+                severity="error",
+            )
+            self.update_detail(self.current_row())
+            return
+        except subprocess.CalledProcessError as exc:
+            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.notify(message_text, title=failure_title, severity="error")
+            self.update_detail(self.current_row())
+            return
+        except asyncio.CancelledError:
+            return
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        self.notify(lines[-1] if lines else "Update finished.", title=success_title)
+        await self.load_status()
+
+    async def revert_rows(self, rows: list[StatusRow]) -> None:
+        paths = [row.entry.path for row in rows]
+        await self.revert_paths(
+            paths,
+            f"Reverting {len(paths)} path(s)...",
+            "svn revert failed",
+            "svn revert",
+        )
+
+    async def revert_paths(
+        self,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        self.detail.update(Text(detail_text, style="dim"))
+        try:
+            output = await self.client.revert_paths(paths)
+        except FileNotFoundError as exc:
+            self.notify(
+                f"command not found: {exc.filename}",
+                title="command failed",
+                severity="error",
+            )
+            self.update_detail(self.current_row())
+            return
+        except subprocess.CalledProcessError as exc:
+            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.notify(message_text, title=failure_title, severity="error")
+            self.update_detail(self.current_row())
+            return
+        except asyncio.CancelledError:
+            return
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        self.notify(lines[-1] if lines else "Revert finished.", title=success_title)
+        await self.load_status()
+
+    def status_directory_path(self) -> Path:
+        return self.client.target if self.client.target.is_dir() else self.client.target.parent
 
     async def load_status(self) -> None:
         self.status_request_id += 1
