@@ -92,6 +92,12 @@ ranger /path/to/svn/working-copy
 
 `tools/svn_fixture.py` 可以创建本地 SVN 仓库、两份 working copy 和一组可切换工作状态。默认目录是 `.dev/svn-fixture/`，可随时删除或通过脚本重建。
 
+直接运行会进入交互菜单，可以用方向键或 `j` / `k` 选择操作，按 `Enter` 执行：
+
+```bash
+python3 tools/svn_fixture.py
+```
+
 初始化或恢复到最初干净环境：
 
 ```bash

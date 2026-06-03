@@ -81,6 +81,12 @@ map zL shell tmux popup -d "#{pane_current_path}" -w 90% -h 90% -E "svn-tui log 
 体验测试时可以用本地 fixture 工具一键生成 SVN 仓库、提交历史和工作副本状态：
 
 ```bash
+python3 tools/svn_fixture.py
+```
+
+直接运行会打开交互菜单，可以用方向键或 `j` / `k` 选择操作，按 `Enter` 执行。也可以显式运行命令：
+
+```bash
 python3 tools/svn_fixture.py init
 python3 tools/svn_fixture.py state mixed
 svn-tui status .dev/svn-fixture/wc

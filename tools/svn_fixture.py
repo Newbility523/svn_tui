@@ -55,6 +55,13 @@ class State:
     apply: Callable[[FixtureContext], None]
 
 
+@dataclass(frozen=True)
+class MenuItem:
+    label: str
+    description: str
+    args: tuple[str, ...]
+
+
 class FixtureError(RuntimeError):
     pass
 
@@ -381,6 +388,130 @@ def command_open(ctx: FixtureContext, args: argparse.Namespace) -> None:
     run([sys.executable, "-m", "svn_tui", args.screen, ctx.paths.wc], check=False)
 
 
+def build_menu_items() -> list[MenuItem]:
+    items = [
+        MenuItem("init", "Rebuild repository and clean working copies.", ("init",)),
+        MenuItem("list", "List available working-copy states.", ("list",)),
+        MenuItem("reset", "Reset fixture to the initial clean environment.", ("reset",)),
+        MenuItem("path", "Print the main fixture working-copy path.", ("path",)),
+    ]
+    items.extend(
+        MenuItem(
+            f"state {state.name}",
+            state.description,
+            ("state", state.name),
+        )
+        for state in STATES.values()
+    )
+    items.extend(
+        [
+            MenuItem("open status", "Open svn-tui status against the fixture.", ("open", "status")),
+            MenuItem("open log", "Open svn-tui log against the fixture.", ("open", "log")),
+        ]
+    )
+    return items
+
+
+def build_menu_namespace(item: MenuItem) -> argparse.Namespace:
+    command = item.args[0]
+    namespace = argparse.Namespace(command=command)
+    if command == "state":
+        namespace.name = item.args[1]
+    elif command == "open":
+        namespace.screen = item.args[1]
+    return namespace
+
+
+def clear_screen() -> None:
+    print("\033[2J\033[H", end="")
+
+
+def render_menu(items: Sequence[MenuItem], selected: int, ctx: FixtureContext) -> None:
+    clear_screen()
+    print("SVN fixture tool")
+    print(f"Root: {ctx.paths.root}")
+    print()
+    print("Use Up/Down or j/k to choose. Enter runs. Esc/q quits.")
+    print()
+    for index, item in enumerate(items):
+        marker = ">" if index == selected else " "
+        print(f"{marker} {item.label:<20} {item.description}")
+
+
+def terminal_is_interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def read_key() -> str:
+    if os.name == "nt":
+        return read_windows_key()
+    return read_posix_key()
+
+
+def read_windows_key() -> str:
+    import msvcrt
+
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        key = msvcrt.getwch()
+        if key == "H":
+            return "up"
+        if key == "P":
+            return "down"
+        return ""
+    if key == "\r":
+        return "enter"
+    if key == "\x1b":
+        return "escape"
+    return key.lower()
+
+
+def read_posix_key() -> str:
+    import select
+    import termios
+    import tty
+
+    file_descriptor = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(file_descriptor)
+    try:
+        tty.setraw(file_descriptor)
+        key = sys.stdin.read(1)
+        if key == "\x1b":
+            if select.select([sys.stdin], [], [], 0.05)[0]:
+                second = sys.stdin.read(1)
+                third = sys.stdin.read(1) if select.select([sys.stdin], [], [], 0.05)[0] else ""
+                if second == "[" and third == "A":
+                    return "up"
+                if second == "[" and third == "B":
+                    return "down"
+            return "escape"
+        if key in ("\r", "\n"):
+            return "enter"
+        return key.lower()
+    finally:
+        termios.tcsetattr(file_descriptor, termios.TCSADRAIN, old_settings)
+
+
+def run_interactive_menu(ctx: FixtureContext) -> int:
+    items = build_menu_items()
+    selected = 0
+    while True:
+        render_menu(items, selected, ctx)
+        key = read_key()
+        if key in ("q", "escape"):
+            clear_screen()
+            return 0
+        if key in ("up", "k"):
+            selected = (selected - 1) % len(items)
+        elif key in ("down", "j"):
+            selected = (selected + 1) % len(items)
+        elif key == "enter":
+            item = items[selected]
+            clear_screen()
+            print(f"Running: python tools/svn_fixture.py {' '.join(item.args)}")
+            return dispatch_command(ctx, build_menu_namespace(item))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create and switch local SVN fixture states for svn-tui UX testing."
@@ -395,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--svnadmin", default="svnadmin", help="svnadmin executable; default: svnadmin"
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("init", help="rebuild the fixture repository and clean working copies")
     subparsers.add_parser("reset", help="reset fixture to the initial clean environment")
@@ -419,10 +550,7 @@ def make_context(args: argparse.Namespace) -> FixtureContext:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    ctx = make_context(args)
+def dispatch_command(ctx: FixtureContext, args: argparse.Namespace) -> int:
     commands: dict[str, Callable[[FixtureContext, argparse.Namespace], None]] = {
         "init": command_init,
         "reset": command_reset,
@@ -440,6 +568,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: command not found: {error.filename}", file=sys.stderr)
         return 1
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    parsed_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(parsed_argv)
+    ctx = make_context(args)
+    if args.command is None:
+        if not terminal_is_interactive():
+            parser.print_help()
+            print(
+                "\nRun without a command in an interactive terminal to open the menu.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            return run_interactive_menu(ctx)
+        except KeyboardInterrupt:
+            clear_screen()
+            return 130
+    return dispatch_command(ctx, args)
 
 
 if __name__ == "__main__":
