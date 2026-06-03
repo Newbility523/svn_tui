@@ -34,9 +34,27 @@ APP_CSS = """
     }
 
     #details {
-        height: 10;
+        height: 7;
         padding: 1 0 0 0;
         border-top: solid $surface;
+    }
+
+    #operation-output-title {
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #operation-output {
+        width: 1fr;
+        height: 6;
+        overflow-y: auto;
+        overflow-x: auto;
+        scrollbar-gutter: stable;
+        scrollbar-size-horizontal: 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-visibility: visible;
     }
 
     #side {
@@ -52,7 +70,8 @@ APP_CSS = """
         text-style: bold;
     }
 
-    #preview {
+    #preview,
+    #diff-preview {
         width: 1fr;
         height: 1fr;
         overflow-y: auto;
@@ -109,6 +128,50 @@ APP_CSS = """
 
     #commit-confirm {
         width: 24;
+    }
+
+    ConfirmActionDialog {
+        align: center middle;
+    }
+
+    #confirm-dialog {
+        width: 74;
+        height: 13;
+        padding: 1 2;
+        background: $surface;
+        border: solid $error;
+    }
+
+    #confirm-title {
+        height: 1;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #confirm-message {
+        height: 5;
+        margin-top: 1;
+    }
+
+    #confirm-actions {
+        width: 1fr;
+        height: 3;
+        margin-top: 1;
+        align: right bottom;
+    }
+
+    #confirm-actions Button {
+        height: 3;
+        margin-left: 1;
+    }
+
+    #confirm-cancel {
+        width: 14;
+    }
+
+    #confirm-ok {
+        width: 16;
     }
 
     HelpDialog {
@@ -287,7 +350,7 @@ APP_CSS = """
 
     #log-action-menu {
         width: 24;
-        height: 5;
+        height: 3;
     }
 
     #log-copy-menu {

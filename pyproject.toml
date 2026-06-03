@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "svn-tui"
+version = "0.1.0"
+description = "Textual TUI client for reviewing SVN working copies."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "textual>=8.2.6",
+]
+
+[project.scripts]
+svn-tui = "svn_tui.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["svn_tui*"]

@@ -50,6 +50,50 @@ class CommitMessageDialog(ModalScreen[str | None]):
             self.action_submit()
 
 
+class ConfirmActionDialog(ModalScreen[bool]):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("n", "cancel", "Cancel", show=False),
+        Binding("y", "confirm", "Confirm"),
+    ]
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        confirm_label: str = "Confirm",
+    ) -> None:
+        super().__init__()
+        self.dialog_title = title
+        self.message = message
+        self.confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label(self.dialog_title, id="confirm-title")
+            yield Static(self.message, id="confirm-message")
+            with Horizontal(id="confirm-actions"):
+                yield Button("Esc Cancel", id="confirm-cancel")
+                yield Button(f"y {self.confirm_label}", variant="error", id="confirm-ok")
+
+    def on_mount(self) -> None:
+        self.query_one("#confirm-cancel", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "confirm-cancel":
+            self.action_cancel()
+            return
+        if event.button.id == "confirm-ok":
+            self.action_confirm()
+
+
 class HelpDialog(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Close"),

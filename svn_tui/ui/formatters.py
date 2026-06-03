@@ -315,6 +315,7 @@ def format_help_text() -> Text:
         ("l", "Open the recent log screen for the current target"),
         ("q", "Quit"),
         ("r", "Refresh SVN status"),
+        ("f", "Cycle status filter"),
         ("Space", "Check or uncheck the current entry"),
         ("v", "Enter visual select mode at the current entry"),
         ("Space in visual", "Invert checked state for every entry in the range"),

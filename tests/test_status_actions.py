@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from svn_tui.models import SvnStatusEntry
 from svn_tui.ui.status_actions import (
     BATCH_STATUS_ACTIONS,
     DIRECTORY_STATUS_ACTIONS,
     SINGLE_STATUS_ACTIONS,
     STATUS_ACTION_KEY_STYLE,
+    single_status_actions_for_entry,
     status_action_for_key,
     status_action_for_option,
 )
@@ -90,6 +94,80 @@ class StatusActionTests(unittest.TestCase):
 
     def test_option_lookup_returns_action(self) -> None:
         self.assertEqual(status_action_for_option("update", BATCH_STATUS_ACTIONS).key, "u")
+
+    def test_unversioned_file_hides_versioned_only_actions(self) -> None:
+        entry = SvnStatusEntry(Path("new.txt"), "?", " ", "?")
+
+        labels = [action.menu_label for action in single_status_actions_for_entry(entry)]
+
+        self.assertEqual(
+            labels,
+            [
+                "a     Add",
+                "i     Ignore",
+                "y/Y   Copy",
+            ],
+        )
+
+    def test_ignored_file_only_shows_copy(self) -> None:
+        entry = SvnStatusEntry(Path("ignored.txt"), "I", " ", "I")
+
+        labels = [action.menu_label for action in single_status_actions_for_entry(entry)]
+
+        self.assertEqual(labels, ["y/Y   Copy"])
+
+    def test_unversioned_add_hotkey_is_available_in_dynamic_menu(self) -> None:
+        entry = SvnStatusEntry(Path("new.txt"), "?", " ", "?")
+        actions = single_status_actions_for_entry(entry)
+
+        self.assertEqual(status_action_for_key("a", actions).option_id, "add")
+
+    def test_unversioned_ignore_hotkey_is_available_in_dynamic_menu(self) -> None:
+        entry = SvnStatusEntry(Path("new.txt"), "?", " ", "?")
+        actions = single_status_actions_for_entry(entry)
+
+        self.assertEqual(status_action_for_key("i", actions).option_id, "ignore")
+
+    def test_conflict_file_shows_resolve_working_action(self) -> None:
+        entry = SvnStatusEntry(Path("conflict.txt"), "C", " ", "C")
+
+        labels = [action.menu_label for action in single_status_actions_for_entry(entry)]
+
+        self.assertEqual(
+            labels,
+            [
+                "l/L   Log",
+                "b/B   Blame",
+                "d/D   Diff Base",
+                "h/H   Diff Head",
+                "s     Resolve Working",
+                "y/Y   Copy",
+                "u     Update",
+                "r     Revert",
+            ],
+        )
+
+    def test_property_conflict_shows_resolve_working_action(self) -> None:
+        entry = SvnStatusEntry(Path("conflict.txt"), " ", "C", " C")
+        actions = single_status_actions_for_entry(entry)
+
+        self.assertEqual(status_action_for_key("s", actions).option_id, "resolve")
+
+    def test_directory_hides_file_only_actions(self) -> None:
+        with TemporaryDirectory() as directory:
+            entry = SvnStatusEntry(Path(directory), "M", " ", "M")
+
+            labels = [action.menu_label for action in single_status_actions_for_entry(entry)]
+
+        self.assertEqual(
+            labels,
+            [
+                "l/L   Log",
+                "y/Y   Copy",
+                "u     Update",
+                "r     Revert",
+            ],
+        )
 
 
 if __name__ == "__main__":

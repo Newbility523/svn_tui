@@ -10,7 +10,7 @@
 - SVN 命令行工具
 - Neovim
 
-安装 Python 依赖：
+安装 Python 依赖和 `svn-tui` 命令入口：
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -21,27 +21,28 @@ python3 -m pip install -r requirements.txt
 默认打开状态界面：
 
 ```bash
-python3 main.py /path/to/svn/working-copy
+svn-tui /path/to/svn/working-copy
 ```
 
-也可以使用包入口：
+也可以使用包入口或源码入口：
 
 ```bash
 python3 -m svn_tui /path/to/svn/working-copy
+python3 main.py /path/to/svn/working-copy
 ```
 
 如果不传路径，默认使用当前目录：
 
 ```bash
-python3 main.py
+svn-tui
 ```
 
 显式选择初始界面：
 
 ```bash
-python3 main.py status /path/to/item
-python3 main.py log /path/to/item
-python3 main.py --screen log /path/to/item
+svn-tui status /path/to/item
+svn-tui log /path/to/item
+svn-tui --screen log /path/to/item
 ```
 
 `status` 接收文件路径时，会自动改用该文件所在目录作为目标，便于从文件管理器选中文件后查看同目录状态。`log` 接收文件路径时会保留文件目标，用于直接查看该文件的历史日志。
@@ -55,8 +56,8 @@ python3 main.py --screen log /path/to/item
 示例 `~/.config/ranger/rc.conf`：
 
 ```text
-map zs shell python3 -m svn_tui status %f
-map zl shell python3 -m svn_tui log %f
+map zs shell svn-tui status %f
+map zl shell svn-tui log %f
 ```
 
 如果使用当前仓库而不是安装后的包入口，可以写成：
@@ -65,6 +66,39 @@ map zl shell python3 -m svn_tui log %f
 map zs shell python3 /path/to/svn_tui/main.py status %f
 map zl shell python3 /path/to/svn_tui/main.py log %f
 ```
+
+在 tmux 里使用 ranger 时，也可以把 `svn-tui` 放进 popup：
+
+```text
+map zS shell tmux popup -d "#{pane_current_path}" -w 90% -h 90% -E "svn-tui status %f"
+map zL shell tmux popup -d "#{pane_current_path}" -w 90% -h 90% -E "svn-tui log %f"
+```
+
+`tmux popup` 会在当前 pane 上方打开一个临时 TUI，退出 `svn-tui` 后 popup 关闭并回到 ranger。
+
+## SVN Fixture Tool
+
+体验测试时可以用本地 fixture 工具一键生成 SVN 仓库、提交历史和工作副本状态：
+
+```bash
+python3 tools/svn_fixture.py init
+python3 tools/svn_fixture.py state mixed
+svn-tui status .dev/svn-fixture/wc
+```
+
+常用命令：
+
+```bash
+python3 tools/svn_fixture.py list
+python3 tools/svn_fixture.py reset
+python3 tools/svn_fixture.py state commit-ready
+python3 tools/svn_fixture.py state conflict
+python3 tools/svn_fixture.py state large-preview
+python3 tools/svn_fixture.py open status
+python3 tools/svn_fixture.py open log
+```
+
+每次 `state <name>` 都会先重建 fixture 到基准提交历史，再制造指定工作状态，避免多次体验测试后本地 repo 累积额外 revision。默认数据放在 `.dev/svn-fixture/`，该目录已被 Git 忽略。
 
 ## Documentation
 
@@ -77,6 +111,7 @@ map zl shell python3 /path/to/svn_tui/main.py log %f
 项目已按后续多界面扩展拆成包结构：
 
 - `main.py`：兼容入口，只调用包内 CLI。
+- `tools/svn_fixture.py`：本地 SVN 体验测试 fixture 工具。
 - `svn_tui/__main__.py`：支持 `python3 -m svn_tui` 入口。
 - `svn_tui/cli.py`：命令行参数解析和启动。
 - `svn_tui/app.py`：Textual App 外壳和全局快捷键。
@@ -111,7 +146,8 @@ map zl shell python3 /path/to/svn_tui/main.py log %f
 - 用空格将条目标记进提交列表。
 - 通过批量操作菜单输入提交信息并提交勾选的文件。
 - 用 `nvim -d` 检查变更。
-- 右侧提供文件预览。
+- 右侧提供 inline diff 预览；未版本控制或无法生成 diff 的条目保留文件预览。
+- 主列表底部保留最近一次 SVN 操作的完整输出，便于回看 update / commit / revert 等命令结果。
 - 主界面按 `l` 打开最近日志全屏界面。
 - 状态列表按 `z` 打开当前条目的操作菜单，按 `Z` 打开勾选条目或当前目录的操作菜单。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
@@ -156,6 +192,7 @@ map zl shell python3 /path/to/svn_tui/main.py log %f
 | `/` | 显示并聚焦状态列表下方的搜索栏 |
 | `n` / `N` | 跳到下一个 / 上一个搜索匹配 |
 | `r` | 刷新 `svn st` |
+| `f` | 在 All / Checked / Conflicts / Unversioned 状态筛选之间切换 |
 | `Ctrl-e` / `Ctrl-y` | 预览向下 / 向上滚动一行 |
 | `Ctrl-d` / `Ctrl-u` | 预览向下 / 向上滚动半页 |
 | `Shift-Right` / `Shift-Left` | 预览横向滚动 |
@@ -216,14 +253,12 @@ map zl shell python3 /path/to/svn_tui/main.py log %f
 
 日志列表按 `p` 后会在当前日志行右侧弹出操作菜单：
 
-- `revert to this`
-- `revert changes from`
 - `copy >`
 
 其中：
 
 - 操作菜单会显示在当前日志行右侧；`copy >` 子菜单会显示在操作菜单右侧。
-- `revert to this` 和 `revert changes from` 当前只展示触发提示，尚未真正执行 SVN 回退。
+- 在 `copy >` 上按 `L` 或 `Enter` 进入子菜单。
 - `copy >` 可进一步复制：
   - `revision`
   - `author`
@@ -240,12 +275,15 @@ Status 和 Log 界面的搜索栏嵌在列表下方，不使用弹窗。
 - `Jump by n/N` 用加粗样式提示后续跳转方式。
 - `n` / `N` 只按当前聚焦列表的搜索词继续向下 / 向上跳转。
 
+Status 界面按 `f` 可以在 All、Checked、Conflicts、Unversioned 之间切换筛选。筛选只影响当前列表展示，已勾选路径会保留；详情栏会显示当前筛选和可见条目数量。
+
 ## Preview
 
 预览区不直接嵌入 Neovim。Textual 和 Neovim 都是终端 UI，直接嵌套会竞争同一个 TTY。
 
 当前做法：
 
+- 版本控制文件优先显示 `svn diff -- <path>` 的 inline diff。
 - Textual 自己渲染只读预览。
 - 小于等于 1 MiB 的文件会一次建立完整行 offset 索引。
 - 1 MiB 到 2 MiB 的文件会先索引前 1200 行，再后台继续补全索引。
@@ -273,8 +311,8 @@ nvim -d base-file working-file
 常用验证命令：
 
 ```bash
-python3 -m compileall main.py svn_tui tests
-python3 main.py --help
+python3 -m compileall main.py svn_tui tools tests
+svn-tui --help
 ```
 
 完整开发说明见 [开发与验证指南](docs/development.md)。

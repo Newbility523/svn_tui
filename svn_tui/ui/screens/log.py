@@ -73,8 +73,6 @@ class LogScreen(Screen[None]):
         self.file_search_label = Static(id="log-file-search-label")
         self.file_search = Input(id="log-file-search", compact=True)
         self.action_menu = ListView(
-            OverlayMenuItem("revert_to_this", "revert to this"),
-            OverlayMenuItem("revert_changes_from", "revert changes from"),
             OverlayMenuItem("copy", "copy", has_submenu=True),
             id="log-action-menu",
         )
@@ -432,11 +430,8 @@ class LogScreen(Screen[None]):
 
     def activate_action_menu_item(self, option_id: str) -> None:
         if option_id == "copy":
+            self.action_enter_submenu()
             return
-        if option_id == "revert_to_this":
-            self.notify("revert to this: not implemented yet", title="log action")
-        elif option_id == "revert_changes_from":
-            self.notify("revert changes from: not implemented yet", title="log action")
         self.hide_overlay_menus()
         self.log_list.focus()
 

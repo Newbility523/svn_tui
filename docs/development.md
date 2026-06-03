@@ -10,7 +10,7 @@
 - SVN 命令行工具
 - Neovim
 
-安装 Python 依赖：
+安装 Python 依赖和 `svn-tui` 命令入口：
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -28,33 +28,34 @@ python3 -m venv .venv
 运行当前目录：
 
 ```bash
-python3 main.py
+svn-tui
 ```
 
 运行指定 SVN 工作副本：
 
 ```bash
-python3 main.py /path/to/svn/working-copy
+svn-tui /path/to/svn/working-copy
 ```
 
 显式选择初始界面：
 
 ```bash
-python3 main.py status /path/to/item
-python3 main.py log /path/to/item
-python3 main.py --screen log /path/to/item
+svn-tui status /path/to/item
+svn-tui log /path/to/item
+svn-tui --screen log /path/to/item
 ```
 
-使用包入口：
+也可以使用包入口或源码入口：
 
 ```bash
 python3 -m svn_tui status /path/to/item
+python3 main.py status /path/to/item
 ```
 
 只检查 CLI 入口：
 
 ```bash
-python3 main.py --help
+svn-tui --help
 ```
 
 ## 验证命令
@@ -63,17 +64,64 @@ python3 main.py --help
 
 ```bash
 python3 -m unittest discover
-python3 -m compileall main.py svn_tui tests
-python3 main.py --help
+python3 -m compileall main.py svn_tui tools tests
+svn-tui --help
 ```
 
 如果使用项目虚拟环境：
 
 ```bash
 .venv/bin/python -m unittest discover
-.venv/bin/python -m compileall main.py svn_tui tests
-.venv/bin/python main.py --help
+.venv/bin/python -m compileall main.py svn_tui tools tests
+.venv/bin/svn-tui --help
 ```
+
+## Ranger / tmux 联动验证
+
+普通 ranger 映射会在当前终端启动外部 TUI，退出 `svn-tui` 后应自然回到 ranger。tmux 环境下可以使用 `tmux popup` 做临时浮窗。
+
+建议在安装了 ranger 的类 Unix 环境中按以下方式验收：
+
+```bash
+ranger /path/to/svn/working-copy
+```
+
+在 ranger 中选中文件或目录后，分别触发 README 中的 status / log 映射，确认能进入目标界面；在 `svn-tui` 中按 `q` 退出后，确认终端回到 ranger 且可继续移动光标。tmux popup 映射还需要确认 popup 关闭后焦点回到原 ranger pane。
+
+## SVN Fixture 体验测试
+
+`tools/svn_fixture.py` 可以创建本地 SVN 仓库、两份 working copy 和一组可切换工作状态。默认目录是 `.dev/svn-fixture/`，可随时删除或通过脚本重建。
+
+初始化或恢复到最初干净环境：
+
+```bash
+python3 tools/svn_fixture.py init
+python3 tools/svn_fixture.py reset
+```
+
+列出可用状态并切换：
+
+```bash
+python3 tools/svn_fixture.py list
+python3 tools/svn_fixture.py state mixed
+python3 tools/svn_fixture.py state conflict
+python3 tools/svn_fixture.py state large-preview
+```
+
+直接打开 `svn-tui`：
+
+```bash
+python3 tools/svn_fixture.py open status
+python3 tools/svn_fixture.py open log
+```
+
+状态说明：
+
+- `clean` / `log-rich`：干净 working copy，仓库里有多条提交记录用于日志界面。
+- `commit-ready`：少量修改、添加和删除，适合测试提交弹窗和勾选流程。
+- `mixed`：包含 modified、added、copied、deleted、missing、unversioned 和 ignore property 变更。
+- `large-preview`：包含大文件、超长行、二进制文件和 versioned diff 预览样本。
+- `conflict`：通过第二份 working copy 制造真实 SVN 文本冲突。
 
 涉及中文路径、列宽或截断逻辑时，建议额外做一个 smoke test：
 
@@ -123,8 +171,8 @@ Screen 可以依赖 services，services 不应依赖 Screen 或 Widget。这样�
 ```bash
 git status --short
 git diff --stat
-python3 -m compileall main.py svn_tui tests
-python3 main.py --help
+python3 -m compileall main.py svn_tui tools tests
+svn-tui --help
 ```
 
 如果当前机器没有 `python` 命令，使用 `python3` 或 `.venv/bin/python`。

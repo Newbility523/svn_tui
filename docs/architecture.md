@@ -19,6 +19,8 @@ main.py
 各层职责：
 
 - `main.py`：兼容入口，只调用 `svn_tui.cli.main()`。
+- `pyproject.toml`：项目打包配置，提供安装后的 `svn-tui` 命令入口。
+- `tools/svn_fixture.py`：应用外的本地体验测试工具，用于生成 SVN fixture 仓库和工作副本状态。
 - `svn_tui/__main__.py`：包入口，支持 `python3 -m svn_tui`。
 - `svn_tui/cli.py`：解析目标路径和初始界面参数，创建并运行 App。
 - `svn_tui/app.py`：Textual App 外壳，只保留全局行为、全局快捷键和首屏选择。

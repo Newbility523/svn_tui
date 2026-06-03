@@ -1,6 +1,8 @@
 .idea/
 .venv/
+.dev/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .nvimlog
 .DS_Store

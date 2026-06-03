@@ -29,7 +29,7 @@ from svn_tui.services.preview import (
     continue_preview_document_index,
 )
 from svn_tui.services.svn import SvnClient
-from svn_tui.ui.dialogs import CommitMessageDialog, HelpDialog
+from svn_tui.ui.dialogs import CommitMessageDialog, ConfirmActionDialog, HelpDialog
 from svn_tui.ui.formatters import (
     commit_success_message,
     display_width,
@@ -44,17 +44,26 @@ from svn_tui.ui.search import find_list_match, list_match_position, status_row_s
 from svn_tui.ui.status_actions import (
     BATCH_STATUS_ACTIONS,
     DIRECTORY_STATUS_ACTIONS,
-    SINGLE_STATUS_ACTIONS,
     StatusAction,
+    single_status_actions_for_entry,
     status_action_for_key,
 )
-from svn_tui.ui.widgets import OverlayMenuItem, PreviewView, StatusRow
+from svn_tui.ui.widgets import OverlayMenuItem, PreviewView, StatusRow, TextPreviewView
 from svn_tui.utils.paths import relative_path
+
+STATUS_FILTERS = ("all", "checked", "conflicts", "unversioned")
+STATUS_FILTER_LABELS = {
+    "all": "All",
+    "checked": "Checked",
+    "conflicts": "Conflicts",
+    "unversioned": "Unversioned",
+}
 
 
 class StatusScreen(Screen[None]):
     BINDINGS = [
         Binding("r", "refresh_status", "Refresh"),
+        Binding("f", "cycle_status_filter", "Filter"),
         Binding("z", "open_status_action_menu", "Actions"),
         Binding("Z", "open_checked_action_menu", "Checked actions"),
         Binding("space", "toggle_entry", "Stage"),
@@ -67,6 +76,9 @@ class StatusScreen(Screen[None]):
         Binding("d", "diff_entry", "Diff"),
         Binding("h", "diff_head_entry", "Diff Head", show=False),
         Binding("b", "blame_entry", "Blame"),
+        Binding("a", "add_entry", "Add", show=False),
+        Binding("i", "ignore_entry", "Ignore", show=False),
+        Binding("s", "resolve_entry", "Resolve", show=False),
         Binding("u", "update_entry", "Update", show=False),
         Binding("U", "update_directory_entry", "Update directory", show=False),
         Binding("y", "copy_entry", "Copy", show=False),
@@ -102,7 +114,11 @@ class StatusScreen(Screen[None]):
         self.search_label = Static(id="status-search-label")
         self.search_input = Input(id="status-search", compact=True)
         self.detail = Static(id="details")
+        self.output_title = Static("Output", id="operation-output-title")
+        self.operation_output = TextPreviewView(id="operation-output")
+        self.preview_title = Static("Preview", id="preview-title")
         self.preview = PreviewView(id="preview")
+        self.diff_preview = TextPreviewView(id="diff-preview")
         self.status_theme = DEFAULT_THEME
         self.preview_task: asyncio.Task[None] | None = None
         self.preview_debounce_task: asyncio.Task[None] | None = None
@@ -119,6 +135,8 @@ class StatusScreen(Screen[None]):
         self.search_match: tuple[int, int] | None = None
         self.status_action_rows: list[StatusRow] = []
         self.status_action_actions: list[StatusAction] = []
+        self.selected_entry_paths: set[Path] = set()
+        self.status_filter = "all"
 
     def compose(self) -> ComposeResult:
         yield self.navigation_bar
@@ -129,9 +147,12 @@ class StatusScreen(Screen[None]):
                 yield self.search_label
                 yield self.search_input
                 yield self.detail
+                yield self.output_title
+                yield self.operation_output
             with Vertical(id="side"):
-                yield Static("Preview", id="preview-title")
+                yield self.preview_title
                 yield self.preview
+                yield self.diff_preview
         with self.status_action_popup:
             yield self.status_action_title
             yield self.status_action_menu
@@ -142,6 +163,10 @@ class StatusScreen(Screen[None]):
         self.app.sub_title = str(self.client.target)
         self.refresh_navigation_bar()
         self.status_action_popup.display = False
+        self.diff_preview.display = False
+        self.operation_output.set_message(
+            Text("No command output yet.", style="dim")
+        )
         self.set_interval(PATH_SCROLL_SECONDS, self.tick_path_scroll)
         self.refresh_search_line()
         await self.load_status()
@@ -162,7 +187,10 @@ class StatusScreen(Screen[None]):
         row = self.current_row()
         if row is None:
             return
-        await self.open_status_action_menu([row], SINGLE_STATUS_ACTIONS)
+        await self.open_status_action_menu(
+            [row],
+            single_status_actions_for_entry(row.entry),
+        )
 
     async def action_open_checked_action_menu(self) -> None:
         self.waiting_for_second_g = False
@@ -170,7 +198,11 @@ class StatusScreen(Screen[None]):
         if not rows:
             await self.open_status_action_menu([], DIRECTORY_STATUS_ACTIONS)
             return
-        actions = SINGLE_STATUS_ACTIONS if len(rows) == 1 else BATCH_STATUS_ACTIONS
+        actions = (
+            single_status_actions_for_entry(rows[0].entry)
+            if len(rows) == 1
+            else BATCH_STATUS_ACTIONS
+        )
         await self.open_status_action_menu(rows, actions)
 
     async def open_status_action_menu(
@@ -267,13 +299,11 @@ class StatusScreen(Screen[None]):
             return
         if option_id == "revert_directory":
             self.hide_status_action_menu()
-            asyncio.create_task(
-                self.revert_paths(
-                    [self.status_directory_path()],
-                    "Reverting this directory...",
-                    "svn revert failed",
-                    "svn revert",
-                )
+            self.confirm_revert_paths(
+                [self.status_directory_path()],
+                "Reverting this directory...",
+                "svn revert failed",
+                "svn revert",
             )
             return
         if not rows:
@@ -307,6 +337,18 @@ class StatusScreen(Screen[None]):
             self.app.copy_to_clipboard("\n".join(str(row.entry.path) for row in rows))
             self.notify(f"Copied {len(rows)} path(s).", title="clipboard")
             return
+        if option_id == "add":
+            self.hide_status_action_menu()
+            asyncio.create_task(self.add_rows(rows))
+            return
+        if option_id == "ignore":
+            self.hide_status_action_menu()
+            asyncio.create_task(self.ignore_rows(rows))
+            return
+        if option_id == "resolve":
+            self.hide_status_action_menu()
+            asyncio.create_task(self.resolve_rows(rows))
+            return
         if option_id == "update":
             self.hide_status_action_menu()
             asyncio.create_task(self.update_rows(rows))
@@ -320,7 +362,7 @@ class StatusScreen(Screen[None]):
             return
         if option_id == "revert":
             self.hide_status_action_menu()
-            asyncio.create_task(self.revert_rows(rows))
+            self.confirm_revert_rows(rows)
             return
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
@@ -359,7 +401,7 @@ class StatusScreen(Screen[None]):
             return
         await self.load_status()
 
-    def action_toggle_entry(self) -> None:
+    async def action_toggle_entry(self) -> None:
         self.waiting_for_second_g = False
         if self.status_action_menu_open:
             return
@@ -369,6 +411,10 @@ class StatusScreen(Screen[None]):
                 return
             for row in rows:
                 row.toggle_selected()
+                self.remember_row_selection(row)
+            if self.status_filter == "checked":
+                await self.render_status_entries()
+                return
             self.refresh_status_rows()
             self.update_detail(self.current_row())
             return
@@ -377,8 +423,18 @@ class StatusScreen(Screen[None]):
         if row is None:
             return
         row.toggle_selected()
+        self.remember_row_selection(row)
+        if self.status_filter == "checked":
+            await self.render_status_entries()
+            return
         self.refresh_status_rows()
         self.update_detail(row)
+
+    def remember_row_selection(self, row: StatusRow) -> None:
+        if row.selected_for_commit:
+            self.selected_entry_paths.add(row.entry.path)
+            return
+        self.selected_entry_paths.discard(row.entry.path)
 
     def action_visual_select(self) -> None:
         self.waiting_for_second_g = False
@@ -550,6 +606,21 @@ class StatusScreen(Screen[None]):
         if error:
             self.notify(error, title="svn blame failed", severity="warning")
 
+    def action_add_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("a"):
+            return
+
+    def action_ignore_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("i"):
+            return
+
+    def action_resolve_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("s"):
+            return
+
     def action_update_entry(self) -> None:
         self.waiting_for_second_g = False
         if self.activate_status_action_hotkey("u"):
@@ -615,30 +686,32 @@ class StatusScreen(Screen[None]):
             self.update_detail(self.current_row())
 
     def action_preview_scroll_down(self) -> None:
-        self.preview.scroll_relative(y=1, animate=False, immediate=True)
+        self.active_preview().scroll_relative(y=1, animate=False, immediate=True)
 
     def action_preview_scroll_up(self) -> None:
-        self.preview.scroll_relative(y=-1, animate=False, immediate=True)
+        self.active_preview().scroll_relative(y=-1, animate=False, immediate=True)
 
     def action_preview_half_page_down(self) -> None:
-        self.preview.scroll_relative(
-            y=max(1, self.preview.size.height // 2),
+        active_preview = self.active_preview()
+        active_preview.scroll_relative(
+            y=max(1, active_preview.size.height // 2),
             animate=False,
             immediate=True,
         )
 
     def action_preview_half_page_up(self) -> None:
-        self.preview.scroll_relative(
-            y=-max(1, self.preview.size.height // 2),
+        active_preview = self.active_preview()
+        active_preview.scroll_relative(
+            y=-max(1, active_preview.size.height // 2),
             animate=False,
             immediate=True,
         )
 
     def action_preview_scroll_right(self) -> None:
-        self.preview.scroll_relative(x=8, animate=False, immediate=True)
+        self.active_preview().scroll_relative(x=8, animate=False, immediate=True)
 
     def action_preview_scroll_left(self) -> None:
-        self.preview.scroll_relative(x=-8, animate=False, immediate=True)
+        self.active_preview().scroll_relative(x=-8, animate=False, immediate=True)
 
     def action_vim_g(self) -> None:
         if self.status_action_menu_open:
@@ -728,15 +801,14 @@ class StatusScreen(Screen[None]):
         try:
             output = await self.client.commit(message, paths)
         except FileNotFoundError as exc:
-            self.notify(
-                f"command not found: {exc.filename}",
-                title="command failed",
-                severity="error",
-            )
+            message_text = f"command not found: {exc.filename}"
+            self.set_operation_output(message_text, "Command failed.")
+            self.notify(message_text, title="command failed", severity="error")
             self.update_detail(self.current_row())
             return
         except subprocess.CalledProcessError as exc:
             message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.set_operation_output(command_error_output(exc), message_text)
             self.notify(message_text, title="svn commit failed", severity="error")
             self.update_detail(self.current_row())
             return
@@ -744,7 +816,128 @@ class StatusScreen(Screen[None]):
             return
 
         commit_message = commit_success_message(output, len(paths))
+        self.set_operation_output(output, commit_message)
         self.notify(commit_message, title="commit finished")
+        await self.load_status()
+
+    async def add_rows(self, rows: list[StatusRow]) -> None:
+        paths = [row.entry.path for row in rows]
+        await self.add_paths(
+            paths,
+            f"Adding {len(paths)} path(s)...",
+            "svn add failed",
+            "svn add",
+        )
+
+    async def add_paths(
+        self,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        self.detail.update(Text(detail_text, style="dim"))
+        try:
+            output = await self.client.add_paths(paths)
+        except FileNotFoundError as exc:
+            message_text = f"command not found: {exc.filename}"
+            self.set_operation_output(message_text, "Command failed.")
+            self.notify(message_text, title="command failed", severity="error")
+            self.update_detail(self.current_row())
+            return
+        except subprocess.CalledProcessError as exc:
+            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.set_operation_output(command_error_output(exc), message_text)
+            self.notify(message_text, title=failure_title, severity="error")
+            self.update_detail(self.current_row())
+            return
+        except asyncio.CancelledError:
+            return
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        fallback = lines[-1] if lines else "Add finished."
+        self.set_operation_output(output, fallback)
+        self.notify(fallback, title=success_title)
+        await self.load_status()
+
+    async def ignore_rows(self, rows: list[StatusRow]) -> None:
+        paths = [row.entry.path for row in rows]
+        await self.ignore_paths(
+            paths,
+            f"Ignoring {len(paths)} path(s)...",
+            "svn ignore failed",
+            "svn ignore",
+        )
+
+    async def ignore_paths(
+        self,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        self.detail.update(Text(detail_text, style="dim"))
+        try:
+            output = await self.client.ignore_paths(paths)
+        except FileNotFoundError as exc:
+            message_text = f"command not found: {exc.filename}"
+            self.set_operation_output(message_text, "Command failed.")
+            self.notify(message_text, title="command failed", severity="error")
+            self.update_detail(self.current_row())
+            return
+        except subprocess.CalledProcessError as exc:
+            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.set_operation_output(command_error_output(exc), message_text)
+            self.notify(message_text, title=failure_title, severity="error")
+            self.update_detail(self.current_row())
+            return
+        except asyncio.CancelledError:
+            return
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        fallback = lines[-1] if lines else "Ignore finished."
+        self.set_operation_output(output, fallback)
+        self.notify(fallback, title=success_title)
+        await self.load_status()
+
+    async def resolve_rows(self, rows: list[StatusRow]) -> None:
+        paths = [row.entry.path for row in rows]
+        await self.resolve_paths(
+            paths,
+            f"Resolving {len(paths)} path(s) with working copy...",
+            "svn resolve failed",
+            "svn resolve",
+        )
+
+    async def resolve_paths(
+        self,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        self.detail.update(Text(detail_text, style="dim"))
+        try:
+            output = await self.client.resolve_paths(paths)
+        except FileNotFoundError as exc:
+            message_text = f"command not found: {exc.filename}"
+            self.set_operation_output(message_text, "Command failed.")
+            self.notify(message_text, title="command failed", severity="error")
+            self.update_detail(self.current_row())
+            return
+        except subprocess.CalledProcessError as exc:
+            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.set_operation_output(command_error_output(exc), message_text)
+            self.notify(message_text, title=failure_title, severity="error")
+            self.update_detail(self.current_row())
+            return
+        except asyncio.CancelledError:
+            return
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        fallback = lines[-1] if lines else "Resolve finished."
+        self.set_operation_output(output, fallback)
+        self.notify(fallback, title=success_title)
         await self.load_status()
 
     async def update_rows(self, rows: list[StatusRow]) -> None:
@@ -767,15 +960,14 @@ class StatusScreen(Screen[None]):
         try:
             output = await self.client.update_paths(paths)
         except FileNotFoundError as exc:
-            self.notify(
-                f"command not found: {exc.filename}",
-                title="command failed",
-                severity="error",
-            )
+            message_text = f"command not found: {exc.filename}"
+            self.set_operation_output(message_text, "Command failed.")
+            self.notify(message_text, title="command failed", severity="error")
             self.update_detail(self.current_row())
             return
         except subprocess.CalledProcessError as exc:
             message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.set_operation_output(command_error_output(exc), message_text)
             self.notify(message_text, title=failure_title, severity="error")
             self.update_detail(self.current_row())
             return
@@ -783,7 +975,9 @@ class StatusScreen(Screen[None]):
             return
 
         lines = [line.strip() for line in output.splitlines() if line.strip()]
-        self.notify(lines[-1] if lines else "Update finished.", title=success_title)
+        fallback = lines[-1] if lines else "Update finished."
+        self.set_operation_output(output, fallback)
+        self.notify(fallback, title=success_title)
         await self.load_status()
 
     async def revert_rows(self, rows: list[StatusRow]) -> None:
@@ -806,15 +1000,14 @@ class StatusScreen(Screen[None]):
         try:
             output = await self.client.revert_paths(paths)
         except FileNotFoundError as exc:
-            self.notify(
-                f"command not found: {exc.filename}",
-                title="command failed",
-                severity="error",
-            )
+            message_text = f"command not found: {exc.filename}"
+            self.set_operation_output(message_text, "Command failed.")
+            self.notify(message_text, title="command failed", severity="error")
             self.update_detail(self.current_row())
             return
         except subprocess.CalledProcessError as exc:
             message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.set_operation_output(command_error_output(exc), message_text)
             self.notify(message_text, title=failure_title, severity="error")
             self.update_detail(self.current_row())
             return
@@ -822,8 +1015,71 @@ class StatusScreen(Screen[None]):
             return
 
         lines = [line.strip() for line in output.splitlines() if line.strip()]
-        self.notify(lines[-1] if lines else "Revert finished.", title=success_title)
+        fallback = lines[-1] if lines else "Revert finished."
+        self.set_operation_output(output, fallback)
+        self.notify(fallback, title=success_title)
         await self.load_status()
+
+    def confirm_revert_rows(self, rows: list[StatusRow]) -> None:
+        paths = [row.entry.path for row in rows]
+        self.confirm_revert_paths(
+            paths,
+            f"Reverting {len(paths)} path(s)...",
+            "svn revert failed",
+            "svn revert",
+        )
+
+    def confirm_revert_paths(
+        self,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        if not paths:
+            return
+        self.app.push_screen(
+            ConfirmActionDialog(
+                "Confirm SVN Revert",
+                self.revert_confirmation_message(paths),
+                confirm_label="Revert",
+            ),
+            lambda confirmed: self.handle_revert_confirmation(
+                confirmed,
+                paths,
+                detail_text,
+                failure_title,
+                success_title,
+            ),
+        )
+
+    def handle_revert_confirmation(
+        self,
+        confirmed: bool,
+        paths: list[Path],
+        detail_text: str,
+        failure_title: str,
+        success_title: str,
+    ) -> None:
+        if not confirmed:
+            self.list_view.focus()
+            return
+        asyncio.create_task(
+            self.revert_paths(paths, detail_text, failure_title, success_title)
+        )
+
+    def revert_confirmation_message(self, paths: list[Path]) -> str:
+        shown_paths = [
+            str(relative_path(path, self.client.display_root))
+            for path in paths
+        ]
+        preview_paths = shown_paths[:3]
+        lines = [f"This will discard local changes for {len(paths)} path(s).", ""]
+        lines.extend(f"- {path}" for path in preview_paths)
+        remaining = len(shown_paths) - len(preview_paths)
+        if remaining > 0:
+            lines.append(f"... and {remaining} more")
+        return "\n".join(lines)
 
     def status_directory_path(self) -> Path:
         return self.client.target if self.client.target.is_dir() else self.client.target.parent
@@ -853,26 +1109,79 @@ class StatusScreen(Screen[None]):
 
         self.entries = entries
         self.visual_anchor_index = None
+        entry_paths = {entry.path for entry in entries}
+        self.selected_entry_paths &= entry_paths
 
+        await self.render_status_entries()
+
+    async def render_status_entries(self) -> None:
         await self.list_view.clear()
         if not self.entries:
             await self.list_view.append(ListItem(Label("Working copy is clean")))
             self.refresh_status_layout()
             self.detail.update(self.format_detail())
             self.preview_document = None
+            self.show_file_preview("Preview")
             self.preview.set_message(Text("No changed file selected.", style="dim"))
-        else:
-            await self.list_view.extend(
-                StatusRow(entry, self.client.display_root, self.status_theme)
-                for entry in self.entries
+            return
+
+        visible_entries = self.filtered_entries()
+        if not visible_entries:
+            await self.list_view.append(
+                ListItem(Label(f"No entries for filter: {self.status_filter_label()}"))
             )
-            self.list_view.index = 0
-            self.list_view.focus()
             self.refresh_status_layout()
-            row = self.current_row()
-            if row is not None:
-                self.update_detail(row)
-                self.schedule_preview(row.entry)
+            self.detail.update(self.format_detail())
+            self.preview_document = None
+            self.show_file_preview("Preview")
+            self.preview.set_message(Text("No changed file selected.", style="dim"))
+            return
+
+        rows = [
+            StatusRow(entry, self.client.display_root, self.status_theme)
+            for entry in visible_entries
+        ]
+        for row in rows:
+            row.selected_for_commit = row.entry.path in self.selected_entry_paths
+        await self.list_view.extend(rows)
+        self.list_view.index = 0
+        self.list_view.focus()
+        self.refresh_status_layout()
+        row = self.current_row()
+        if row is not None:
+            self.update_detail(row)
+            self.schedule_preview(row.entry)
+
+    def filtered_entries(self) -> list[SvnStatusEntry]:
+        if self.status_filter == "checked":
+            return [
+                entry
+                for entry in self.entries
+                if entry.path in self.selected_entry_paths
+            ]
+        if self.status_filter == "conflicts":
+            return [
+                entry
+                for entry in self.entries
+                if entry.text_status == "C" or entry.prop_status == "C"
+            ]
+        if self.status_filter == "unversioned":
+            return [entry for entry in self.entries if entry.text_status == "?"]
+        return list(self.entries)
+
+    def status_filter_label(self) -> str:
+        return STATUS_FILTER_LABELS.get(self.status_filter, self.status_filter)
+
+    async def action_cycle_status_filter(self) -> None:
+        self.waiting_for_second_g = False
+        if self.status_action_menu_open:
+            return
+        current_index = STATUS_FILTERS.index(self.status_filter)
+        self.status_filter = STATUS_FILTERS[(current_index + 1) % len(STATUS_FILTERS)]
+        self.visual_anchor_index = None
+        self.search_match = None
+        await self.render_status_entries()
+        self.notify(f"Filter: {self.status_filter_label()}", title="status filter")
 
     def status_row_width(self) -> int:
         return max(self.list_view.size.width, self.status_header.size.width, 80)
@@ -926,16 +1235,26 @@ class StatusScreen(Screen[None]):
 
     def schedule_preview(self, entry: SvnStatusEntry) -> None:
         if not PREVIEW_ENABLED:
-            self.preview.update(Text("Preview disabled.", style="dim"))
+            self.show_file_preview("Preview")
+            self.preview.set_message(Text("Preview disabled.", style="dim"))
             return
         self.preview_request_id += 1
         request_id = self.preview_request_id
         if self.preview_debounce_task is not None:
             self.preview_debounce_task.cancel()
+        if self.preview_task is not None:
+            self.preview_task.cancel()
+        if self.preview_index_task is not None:
+            self.preview_index_task.cancel()
         if self.preview_cancel_token is not None:
             self.preview_cancel_token.cancel()
         self.preview_document = None
-        self.preview.set_message(Text("Loading preview...", style="dim"))
+        if self.should_show_inline_diff(entry):
+            self.show_diff_preview("Diff Preview")
+            self.diff_preview.set_message(Text("Loading diff...", style="dim"))
+        else:
+            self.show_file_preview("File Preview")
+            self.preview.set_message(Text("Loading preview...", style="dim"))
         self.preview_debounce_task = asyncio.create_task(
             self.start_preview_after_delay(entry, request_id)
         )
@@ -960,6 +1279,10 @@ class StatusScreen(Screen[None]):
         entry: SvnStatusEntry,
         request_id: int,
     ) -> None:
+        if self.should_show_inline_diff(entry):
+            await self.load_diff_preview(entry, request_id)
+            return
+
         token = PreviewCancelToken()
         try:
             async with self.preview_lock:
@@ -988,6 +1311,62 @@ class StatusScreen(Screen[None]):
                     self.continue_preview_index(document, token, request_id)
                 )
 
+    async def load_diff_preview(
+        self,
+        entry: SvnStatusEntry,
+        request_id: int,
+    ) -> None:
+        try:
+            diff_text = await self.client.diff_for_status_entry(entry)
+        except FileNotFoundError as exc:
+            if request_id != self.preview_request_id:
+                return
+            self.notify(
+                f"command not found: {exc.filename}",
+                title="command failed",
+                severity="error",
+            )
+            self.diff_preview.set_message(Text("Unable to load svn diff.", style="red"))
+            return
+        except subprocess.CalledProcessError as exc:
+            if request_id != self.preview_request_id:
+                return
+            message = exc.stderr.strip() or exc.output.strip() or str(exc)
+            self.notify(message, title="svn diff failed", severity="error")
+            self.diff_preview.set_message(Text(message, style="red"))
+            return
+        except asyncio.CancelledError:
+            return
+
+        if request_id != self.preview_request_id:
+            return
+        self.preview_document = None
+        self.show_diff_preview("Diff Preview")
+        if not diff_text.strip():
+            self.diff_preview.set_message(
+                Text("No textual diff for this path.", style="dim")
+            )
+            return
+        self.diff_preview.set_text(diff_text, lexer="diff", line_numbers=False)
+
+    def should_show_inline_diff(self, entry: SvnStatusEntry) -> bool:
+        if entry.text_status in {"?", "I"}:
+            return False
+        return not entry.path.is_dir()
+
+    def show_file_preview(self, title: str) -> None:
+        self.preview_title.update(title)
+        self.diff_preview.display = False
+        self.preview.display = True
+
+    def show_diff_preview(self, title: str) -> None:
+        self.preview_title.update(title)
+        self.preview.display = False
+        self.diff_preview.display = True
+
+    def active_preview(self) -> PreviewView | TextPreviewView:
+        return self.diff_preview if self.diff_preview.display else self.preview
+
     async def continue_preview_index(
         self,
         document: PreviewDocument,
@@ -1015,11 +1394,19 @@ class StatusScreen(Screen[None]):
     def update_detail(self, row: StatusRow | None = None) -> None:
         self.detail.update(self.format_detail(row))
 
+    def set_operation_output(self, output: str, fallback: str) -> None:
+        if output.strip():
+            self.operation_output.set_text(output, lexer="text", line_numbers=False)
+            return
+        self.operation_output.set_message(Text(fallback, style="dim"))
+
     def format_detail(self, row: StatusRow | None = None) -> Text:
-        selected = self.selected_rows()
+        visible_count = len(self.filtered_entries()) if self.entries else 0
         detail = Text()
         detail.append(f"Changed: {len(self.entries)}  ")
-        detail.append(f"Commit list: {len(selected)}\n")
+        detail.append(f"Visible: {visible_count}  ")
+        detail.append(f"Commit list: {len(self.selected_entry_paths)}  ")
+        detail.append(f"Filter: {self.status_filter_label()}\n")
         if self.visual_anchor_index is not None:
             detail.append(
                 f"Visual range: {len(self.visual_rows())}  "
@@ -1044,3 +1431,12 @@ class StatusScreen(Screen[None]):
             detail.append(f"  Full: {row.entry.path}\n")
 
         return detail
+
+
+def command_error_output(exc: subprocess.CalledProcessError) -> str:
+    parts = []
+    if isinstance(exc.output, str) and exc.output.strip():
+        parts.append(exc.output.strip())
+    if isinstance(exc.stderr, str) and exc.stderr.strip():
+        parts.append(exc.stderr.strip())
+    return "\n".join(parts) or str(exc)

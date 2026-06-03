@@ -34,12 +34,39 @@ def build_svn_commit_args(message: str, paths: list[Path]) -> list[str]:
     return ["svn", "commit", "-m", message, "--", *(str(path) for path in paths)]
 
 
+def build_svn_add_args(paths: list[Path]) -> list[str]:
+    return ["svn", "add", "--", *(str(path) for path in paths)]
+
+
 def build_svn_update_args(paths: list[Path]) -> list[str]:
     return ["svn", "update", "--", *(str(path) for path in paths)]
 
 
+def build_svn_diff_args(paths: list[Path]) -> list[str]:
+    return ["svn", "diff", "--", *(str(path) for path in paths)]
+
+
 def build_svn_revert_args(paths: list[Path]) -> list[str]:
     return ["svn", "revert", "--", *(str(path) for path in paths)]
+
+
+def build_svn_resolve_args(paths: list[Path], accept: str = "working") -> list[str]:
+    return [
+        "svn",
+        "resolve",
+        "--accept",
+        accept,
+        "--",
+        *(str(path) for path in paths),
+    ]
+
+
+def build_svn_propget_args(property_name: str, path: Path) -> list[str]:
+    return ["svn", "propget", property_name, str(path)]
+
+
+def build_svn_propset_args(property_name: str, value: str, path: Path) -> list[str]:
+    return ["svn", "propset", property_name, value, str(path)]
 
 
 def build_svn_cat_args(path: Path, revision: str) -> list[str]:
@@ -80,14 +107,40 @@ class SvnClient:
     async def commit(self, message: str, paths: list[Path]) -> str:
         return await run_command_text(build_svn_commit_args(message, paths))
 
+    async def add_paths(self, paths: list[Path]) -> str:
+        return await run_command_text(build_svn_add_args(paths))
+
     async def update_paths(self, paths: list[Path]) -> str:
         return await run_command_text(build_svn_update_args(paths))
 
     async def update_path(self, path: Path) -> str:
         return await self.update_paths([path])
 
+    async def diff_for_status_entry(self, entry: SvnStatusEntry) -> str:
+        return await run_command_text(build_svn_diff_args([entry.path]))
+
     async def revert_paths(self, paths: list[Path]) -> str:
         return await run_command_text(build_svn_revert_args(paths))
+
+    async def resolve_paths(self, paths: list[Path], accept: str = "working") -> str:
+        return await run_command_text(build_svn_resolve_args(paths, accept))
+
+    async def ignore_paths(self, paths: list[Path]) -> str:
+        outputs: list[str] = []
+        for path in paths:
+            outputs.append(await self.ignore_path(path))
+        return "\n".join(outputs)
+
+    async def ignore_path(self, path: Path) -> str:
+        parent = path.parent
+        pattern = path.name
+        current = await run_command_text(build_svn_propget_args("svn:ignore", parent))
+        updated = append_svn_ignore_pattern(current, pattern)
+        if updated is None:
+            return f"{pattern} is already in svn:ignore for {parent}"
+        return await run_command_text(
+            build_svn_propset_args("svn:ignore", updated, parent)
+        )
 
     async def ensure_repository_metadata(self) -> None:
         if self.repo_info_loaded:
@@ -96,7 +149,9 @@ class SvnClient:
         repo_root_url = await run_command_text(
             ["svn", "info", "--show-item", "repos-root-url", str(probe)]
         )
-        target_url = await run_command_text(["svn", "info", "--show-item", "url", str(probe)])
+        target_url = await run_command_text(
+            ["svn", "info", "--show-item", "url", str(probe)]
+        )
         self.repo_root_url = repo_root_url.strip().rstrip("/")
         self.target_url = target_url.strip()
         if self.repo_root_url and self.target_url.startswith(self.repo_root_url):
@@ -131,7 +186,9 @@ class SvnClient:
         error: subprocess.CalledProcessError | None = None
         for candidate in dedupe_strings(candidates):
             try:
-                return await run_command_text(["svn", "diff", "-c", revision, candidate])
+                return await run_command_text(
+                    ["svn", "diff", "-c", revision, candidate]
+                )
             except subprocess.CalledProcessError as exc:
                 error = exc
         if error is not None:
@@ -292,3 +349,10 @@ def dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def append_svn_ignore_pattern(current: str, pattern: str) -> str | None:
+    patterns = [line for line in current.splitlines() if line.strip()]
+    if pattern in patterns:
+        return None
+    return "\n".join([*patterns, pattern])
