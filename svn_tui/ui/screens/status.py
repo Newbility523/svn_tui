@@ -28,8 +28,18 @@ from svn_tui.services.preview import (
     build_preview_document,
     continue_preview_document_index,
 )
-from svn_tui.services.svn import SvnClient
-from svn_tui.ui.dialogs import CommitMessageDialog, ConfirmActionDialog, HelpDialog
+from svn_tui.services.svn import (
+    SvnClient,
+    build_svn_cleanup_args,
+    build_svn_commit_args,
+)
+from svn_tui.ui.dialogs import (
+    CommitMessageDialog,
+    ConfirmActionDialog,
+    HelpDialog,
+    SvnCommandDialog,
+    SvnCommandResult,
+)
 from svn_tui.ui.formatters import (
     commit_success_message,
     display_width,
@@ -84,6 +94,13 @@ class StatusScreen(Screen[None]):
         Binding("y", "copy_entry", "Copy", show=False),
         Binding("Y", "copy_entry", "Copy", show=False),
         Binding("R", "revert_directory_entry", "Revert directory", show=False),
+        Binding("C", "cleanup_directory_entry", "Clean up directory", show=False),
+        Binding(
+            "X",
+            "remove_unversioned_directory_entry",
+            "Remove unversioned",
+            show=False,
+        ),
         Binding("slash", "search", "Search", key_display="/"),
         Binding("n", "search_next", "Next", show=False),
         Binding("N", "search_previous", "Previous", show=False),
@@ -198,12 +215,7 @@ class StatusScreen(Screen[None]):
         if not rows:
             await self.open_status_action_menu([], DIRECTORY_STATUS_ACTIONS)
             return
-        actions = (
-            single_status_actions_for_entry(rows[0].entry)
-            if len(rows) == 1
-            else BATCH_STATUS_ACTIONS
-        )
-        await self.open_status_action_menu(rows, actions)
+        await self.open_status_action_menu(rows, BATCH_STATUS_ACTIONS)
 
     async def open_status_action_menu(
         self,
@@ -305,6 +317,14 @@ class StatusScreen(Screen[None]):
                 "svn revert failed",
                 "svn revert",
             )
+            return
+        if option_id == "cleanup_directory":
+            self.hide_status_action_menu()
+            self.open_cleanup_dialog(remove_unversioned=False)
+            return
+        if option_id == "remove_unversioned_directory":
+            self.hide_status_action_menu()
+            self.confirm_remove_unversioned_directory()
             return
         if not rows:
             self.hide_status_action_menu()
@@ -477,7 +497,7 @@ class StatusScreen(Screen[None]):
             )
             return
 
-        asyncio.create_task(self.commit_rows(rows, message.strip()))
+        self.open_commit_command_dialog(rows, message.strip())
 
     def action_show_help(self) -> None:
         self.waiting_for_second_g = False
@@ -641,6 +661,16 @@ class StatusScreen(Screen[None]):
         if self.activate_status_action_hotkey("R"):
             return
 
+    def action_cleanup_directory_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("C"):
+            return
+
+    def action_remove_unversioned_directory_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("X"):
+            return
+
     def action_cursor_down(self) -> None:
         self.waiting_for_second_g = False
         if self.status_action_menu_open:
@@ -795,30 +825,20 @@ class StatusScreen(Screen[None]):
             if isinstance(row, StatusRow) and row.selected_for_commit
         ]
 
-    async def commit_rows(self, rows: list[StatusRow], message: str) -> None:
+    def open_commit_command_dialog(self, rows: list[StatusRow], message: str) -> None:
         paths = [row.entry.path for row in rows]
-        self.detail.update(Text(f"Committing {len(paths)} file(s)...", style="dim"))
-        try:
-            output = await self.client.commit(message, paths)
-        except FileNotFoundError as exc:
-            message_text = f"command not found: {exc.filename}"
-            self.set_operation_output(message_text, "Command failed.")
-            self.notify(message_text, title="command failed", severity="error")
-            self.update_detail(self.current_row())
-            return
-        except subprocess.CalledProcessError as exc:
-            message_text = exc.stderr.strip() or exc.output.strip() or str(exc)
-            self.set_operation_output(command_error_output(exc), message_text)
-            self.notify(message_text, title="svn commit failed", severity="error")
-            self.update_detail(self.current_row())
-            return
-        except asyncio.CancelledError:
-            return
-
-        commit_message = commit_success_message(output, len(paths))
-        self.set_operation_output(output, commit_message)
-        self.notify(commit_message, title="commit finished")
-        await self.load_status()
+        self.app.push_screen(
+            SvnCommandDialog(
+                build_svn_commit_args(message, paths),
+                title="SVN Commit",
+            ),
+            lambda result: self.handle_svn_command_result(
+                result,
+                success_title="commit finished",
+                failure_title="svn commit failed",
+                success_fallback=commit_success_message("", len(paths)),
+            ),
+        )
 
     async def add_rows(self, rows: list[StatusRow]) -> None:
         paths = [row.entry.path for row in rows]
@@ -1067,6 +1087,106 @@ class StatusScreen(Screen[None]):
         asyncio.create_task(
             self.revert_paths(paths, detail_text, failure_title, success_title)
         )
+
+    def confirm_remove_unversioned_directory(self) -> None:
+        path = self.status_directory_path()
+        self.app.push_screen(
+            ConfirmActionDialog(
+                "Confirm Remove Unversioned",
+                self.remove_unversioned_confirmation_message(path),
+                confirm_label="Remove",
+            ),
+            lambda confirmed: self.handle_remove_unversioned_confirmation(
+                confirmed,
+                path,
+            ),
+        )
+
+    def handle_remove_unversioned_confirmation(
+        self,
+        confirmed: bool,
+        path: Path,
+    ) -> None:
+        if not confirmed:
+            self.list_view.focus()
+            return
+        self.open_cleanup_dialog(remove_unversioned=True, path=path)
+
+    def remove_unversioned_confirmation_message(self, path: Path) -> str:
+        shown_path = relative_path(path, self.client.display_root)
+        return "\n".join(
+            [
+                "This will delete unversioned files under:",
+                "",
+                str(shown_path),
+                "",
+                "SVN cannot restore those files.",
+            ]
+        )
+
+    def open_cleanup_dialog(
+        self,
+        *,
+        remove_unversioned: bool,
+        path: Path | None = None,
+    ) -> None:
+        target = path or self.status_directory_path()
+        title = "Remove Unversioned Files" if remove_unversioned else "SVN Cleanup"
+        success_fallback = (
+            "Remove unversioned finished."
+            if remove_unversioned
+            else "Cleanup finished."
+        )
+        self.app.push_screen(
+            SvnCommandDialog(
+                build_svn_cleanup_args(target, remove_unversioned=remove_unversioned),
+                title=title,
+            ),
+            lambda result: self.handle_svn_command_result(
+                result,
+                success_title="svn cleanup",
+                failure_title="svn cleanup failed",
+                success_fallback=success_fallback,
+            ),
+        )
+
+    def handle_svn_command_result(
+        self,
+        result: SvnCommandResult | None,
+        *,
+        success_title: str,
+        failure_title: str,
+        success_fallback: str,
+    ) -> None:
+        self.list_view.focus()
+        if result is None:
+            return
+        message = self.svn_command_result_summary(result, success_fallback)
+        self.set_operation_output(result.output, message)
+        if result.cancelled:
+            self.notify(message, title="command cancelled", severity="warning")
+            return
+        if result.succeeded:
+            self.notify(message, title=success_title)
+            asyncio.create_task(self.load_status())
+            return
+        self.notify(message, title=failure_title, severity="error")
+
+    @staticmethod
+    def svn_command_result_summary(
+        result: SvnCommandResult,
+        success_fallback: str,
+    ) -> str:
+        lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+        if result.cancelled:
+            return "Command cancelled."
+        if result.succeeded:
+            return lines[-1] if lines else success_fallback
+        if lines:
+            return lines[-1]
+        if result.return_code is None:
+            return "Command failed."
+        return f"Exited with code {result.return_code}."
 
     def revert_confirmation_message(self, paths: list[Path]) -> str:
         shown_paths = [

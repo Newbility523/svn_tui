@@ -120,7 +120,7 @@ def format_command(args: Sequence[str]) -> str:
 
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    path.write_text(content.replace("\r\n", "\n").replace("\r", "\n"), encoding="utf-8")
 
 
 def append_text(path: Path, content: str) -> None:

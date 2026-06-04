@@ -198,6 +198,97 @@ APP_CSS = """
         margin-top: 1;
     }
 
+    SvnCommandDialog {
+        align: center middle;
+    }
+
+    #svn-command-dialog {
+        width: 92%;
+        height: 82%;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #svn-command-title {
+        height: 1;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #svn-command-top {
+        height: 5;
+        margin-top: 1;
+        border: solid $surface-lighten-1;
+    }
+
+    #svn-command-command-title {
+        height: 1;
+        padding: 0 1;
+        background: $panel;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #svn-command-command {
+        height: 1fr;
+        padding: 1;
+    }
+
+    #svn-command-bottom {
+        height: 1fr;
+        margin-top: 1;
+        border: solid $surface-lighten-1;
+    }
+
+    #svn-command-output-title {
+        height: 1;
+        padding: 0 1;
+        background: $panel;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #svn-command-output {
+        height: 1fr;
+        padding: 1;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 1;
+        scrollbar-visibility: visible;
+    }
+
+    #svn-command-actions {
+        width: 1fr;
+        height: 3;
+        margin-top: 1;
+        align: right bottom;
+    }
+
+    #svn-command-status {
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
+    }
+
+    #svn-command-actions Button {
+        height: 3;
+        margin-left: 1;
+    }
+
+    #svn-command-keep-running {
+        width: 18;
+    }
+
+    #svn-command-confirm-cancel {
+        width: 20;
+    }
+
+    #svn-command-cancel {
+        width: 18;
+    }
+
     LogScreen {
         layout: vertical;
         layers: base overlay;

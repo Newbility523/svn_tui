@@ -9,6 +9,7 @@ from svn_tui.services.svn import (
     append_svn_ignore_pattern,
     build_svn_add_args,
     build_svn_cat_args,
+    build_svn_cleanup_args,
     build_svn_commit_args,
     build_svn_diff_args,
     build_svn_propget_args,
@@ -65,6 +66,18 @@ class SvnCommandTests(unittest.TestCase):
                 "a b.txt",
                 "c.txt",
             ],
+        )
+
+    def test_build_svn_cleanup_args_targets_directory(self) -> None:
+        self.assertEqual(
+            build_svn_cleanup_args(Path("work copy")),
+            ["svn", "cleanup", "--", "work copy"],
+        )
+
+    def test_build_svn_cleanup_args_can_remove_unversioned(self) -> None:
+        self.assertEqual(
+            build_svn_cleanup_args(Path("work copy"), remove_unversioned=True),
+            ["svn", "cleanup", "--remove-unversioned", "--", "work copy"],
         )
 
     def test_build_svn_propget_args_targets_property(self) -> None:

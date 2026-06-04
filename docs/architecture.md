@@ -45,7 +45,7 @@ main.py
 7. `StatusRow` 负责将 `SvnStatusEntry` 渲染为可勾选列表行。
 8. 当前行变化后，右侧 `PreviewView` 延迟 200ms 加载预览，避免快速移动时频繁读文件。
 9. 预览服务按文件大小决定完整索引、后台补全索引或只显示前缀内容。
-10. 用户勾选条目后按 `Z` 打开批量菜单，再通过 `Commit` 输入提交说明，`SvnClient.commit()` 执行 `svn commit -m <message> -- <paths>`。
+10. 用户勾选条目后按 `Z` 打开批量菜单，再通过 `Commit` 输入提交说明，`SvnCommandDialog` 执行 `svn commit -m <message> -- <paths>` 并展示实时输出。
 11. 提交完成后重新加载状态列表。
 
 ## Diff 和 Blame 链路
@@ -60,14 +60,24 @@ main.py
 ## 状态操作菜单链路
 
 1. 状态界面按 `z` 打开当前高亮条目的操作菜单。
-2. 状态界面按 `Z` 打开勾选条目的操作菜单；未勾选任何条目时显示目录级操作，勾选一个条目时等同于 `z`，勾选多个条目时显示批量操作和目录级操作。
+2. 状态界面按 `Z` 打开勾选条目的操作菜单；未勾选任何条目时显示目录级操作，只要勾选了条目就显示批量操作和目录级操作。
 3. 菜单打开时，菜单快捷键优先触发菜单项，不触发底层 Status 快捷键。
 4. 单条目 `Log` 为目标条目创建新的 `SvnClient` 并进入 `LogScreen`。
 5. 单条目 `Blame`、`Diff Base`、`Diff Head` 暂停 Textual 后交给 Neovim。
 6. `Copy` 复制目标条目的完整本地路径；批量复制时每行一个路径。
-7. 小写 `u/r` 针对选中条目执行 `svn update` / `svn revert`，大写 `U/R` 在批量菜单底部针对当前 Status 目录执行目录级操作。
-8. `Commit` 只出现在批量菜单中，打开提交信息弹窗并提交勾选条目。
-9. 更新和还原操作完成后刷新状态列表。
+7. 小写 `u/r` 针对选中条目执行 `svn update` / `svn revert`，大写 `U/R/C/X` 在批量菜单底部针对当前 Status 目录执行目录级操作。
+8. `Commit` 只出现在批量菜单中，先打开提交信息弹窗，再打开命令运行弹窗执行真实 `svn commit`。
+9. `Remove Unversioned...` 会先打开确认弹窗，确认后再执行 `svn cleanup --remove-unversioned -- <directory>`。
+10. `Commit`、`Clean Up this Directory` 和 `Remove Unversioned...` 使用 SVN 命令运行弹窗，实时展示 stdout/stderr，支持运行中取消。
+11. 提交、更新、还原和 cleanup 操作完成后刷新状态列表。
+
+## SVN 命令运行弹窗
+
+1. `SvnCommandDialog` 接收真实命令参数数组，使用异步子进程执行命令。
+2. 弹窗上方展示命令，下方滚动追加 stdout/stderr 合并输出。
+3. 运行中按 `Esc` 会先进入取消确认；确认后终止子进程并标记为 cancelled。
+4. 命令结束或取消后，`Esc` 关闭弹窗并把输出结果交回调用方。
+5. 状态界面收到结果后更新底部 Output 面板，并在成功时刷新 `svn st`。
 
 ## 日志界面链路
 

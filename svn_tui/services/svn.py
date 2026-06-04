@@ -61,6 +61,13 @@ def build_svn_resolve_args(paths: list[Path], accept: str = "working") -> list[s
     ]
 
 
+def build_svn_cleanup_args(path: Path, *, remove_unversioned: bool = False) -> list[str]:
+    args = ["svn", "cleanup"]
+    if remove_unversioned:
+        args.append("--remove-unversioned")
+    return [*args, "--", str(path)]
+
+
 def build_svn_propget_args(property_name: str, path: Path) -> list[str]:
     return ["svn", "propget", property_name, str(path)]
 

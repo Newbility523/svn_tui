@@ -9,7 +9,7 @@ from textual.widgets import Header
 
 from svn_tui.app import SvnTui
 from svn_tui.models import SvnStatusEntry
-from svn_tui.ui.dialogs import ConfirmActionDialog
+from svn_tui.ui.dialogs import ConfirmActionDialog, SvnCommandDialog
 from svn_tui.ui.widgets import StatusRow
 
 
@@ -191,10 +191,12 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "U     Update this Directory",
                     "R     Revert this Directory",
+                    "C     Clean Up this Directory",
+                    "X     Remove Unversioned...",
                 ],
             )
 
-    async def test_checked_action_menu_uses_single_menu_for_one_checked_row(self) -> None:
+    async def test_checked_action_menu_uses_batch_menu_for_one_checked_row(self) -> None:
         app = SvnTui(Path("."))
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -215,8 +217,21 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                 label_plain_text(child.query_one("Label"))
                 for child in screen.status_action_menu.children
             ]
-            self.assertEqual(labels[0], "l/L   Log")
+            self.assertEqual(
+                labels,
+                [
+                    "u     Update",
+                    "c     Commit",
+                    "r     Revert",
+                    "y/Y   Copy",
+                    "U     Update this Directory",
+                    "R     Revert this Directory",
+                    "C     Clean Up this Directory",
+                    "X     Remove Unversioned...",
+                ],
+            )
             self.assertEqual(screen.status_action_title.content, "README.md")
+            self.assertEqual(screen.status_action_menu.styles.height.value, len(labels))
             self.assertEqual(screen.status_action_rows, [row])
 
     async def test_checked_action_menu_uses_batch_menu_for_multiple_checked_rows(self) -> None:
@@ -257,6 +272,8 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "y/Y   Copy",
                     "U     Update this Directory",
                     "R     Revert this Directory",
+                    "C     Clean Up this Directory",
+                    "X     Remove Unversioned...",
                 ],
             )
             self.assertEqual(screen.status_action_title.content, "Multi")
@@ -281,6 +298,42 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.1)
 
             self.assertEqual(len(app.screen_stack), 1)
+
+    async def test_commit_message_opens_svn_command_dialog(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            row = StatusRow(
+                SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M"),
+                Path(".").resolve(),
+            )
+            pushed = []
+
+            def fake_push_screen(dialog, callback=None):
+                pushed.append((dialog, callback))
+
+            app.push_screen = fake_push_screen
+
+            screen.handle_commit_message([row], "ship it")
+
+            self.assertEqual(len(pushed), 1)
+            dialog, callback = pushed[0]
+            self.assertIsInstance(dialog, SvnCommandDialog)
+            self.assertEqual(dialog.dialog_title, "SVN Commit")
+            self.assertEqual(
+                dialog.args,
+                (
+                    "svn",
+                    "commit",
+                    "-m",
+                    "ship it",
+                    "--",
+                    str(row.entry.path),
+                ),
+            )
+            self.assertIsNotNone(callback)
 
     async def test_status_action_menu_navigation_takes_priority(self) -> None:
         app = SvnTui(Path("."))
@@ -607,6 +660,69 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(reverted[0][0], [screen.status_directory_path()])
             self.assertIn("directory", reverted[0][1])
+
+    async def test_checked_action_menu_uppercase_c_opens_cleanup_dialog(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            entry = SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M")
+            await screen.list_view.clear()
+            await screen.list_view.append(StatusRow(entry, Path(".").resolve()))
+            screen.list_view.index = 0
+            screen.list_view.focus()
+            cleanup_calls = []
+
+            def fake_open_cleanup_dialog(**kwargs):
+                cleanup_calls.append(kwargs)
+
+            screen.open_cleanup_dialog = fake_open_cleanup_dialog
+
+            await pilot.press("Z")
+            await pilot.press("C")
+            await pilot.pause(0.1)
+
+            self.assertEqual(cleanup_calls, [{"remove_unversioned": False}])
+            self.assertFalse(screen.status_action_popup.display)
+
+    async def test_checked_action_menu_uppercase_x_confirms_remove_unversioned(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            entry = SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M")
+            await screen.list_view.clear()
+            await screen.list_view.append(StatusRow(entry, Path(".").resolve()))
+            screen.list_view.index = 0
+            screen.list_view.focus()
+            cleanup_calls = []
+
+            def fake_open_cleanup_dialog(**kwargs):
+                cleanup_calls.append(kwargs)
+
+            screen.open_cleanup_dialog = fake_open_cleanup_dialog
+
+            await pilot.press("Z")
+            await pilot.press("X")
+            await pilot.pause(0.1)
+
+            self.assertIsInstance(app.screen, ConfirmActionDialog)
+            self.assertEqual(cleanup_calls, [])
+
+            await pilot.press("y")
+            await pilot.pause(0.1)
+
+            self.assertEqual(
+                cleanup_calls,
+                [
+                    {
+                        "remove_unversioned": True,
+                        "path": screen.status_directory_path(),
+                    }
+                ],
+            )
 
     async def test_checked_action_menu_lowercase_u_updates_selected_rows(self) -> None:
         app = SvnTui(Path("."))

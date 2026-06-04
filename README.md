@@ -140,7 +140,7 @@ python3 tools/svn_fixture.py open log
 1. CLI 解析目标工作副本路径，启动 `SvnTui`。
 2. App 进入 `StatusScreen`，通过 `SvnClient.status()` 异步执行 `svn st`。
 3. 状态列表将 `SvnStatusEntry` 渲染为可勾选行，右侧按当前行延迟加载只读预览。
-4. 用户勾选文件后输入提交说明，`SvnClient.commit()` 执行 `svn commit`，完成后刷新状态。
+4. 用户勾选文件后输入提交说明，`SvnCommandDialog` 执行 `svn commit` 并展示实时输出，完成后刷新状态。
 5. 用户打开 diff / blame 时暂停 Textual，交给真实 `nvim` 处理交互。
 6. 用户进入 `LogScreen` 后，`SvnClient.recent_logs()` 读取仓库日志，选中 revision/path 后再异步加载 `svn diff`。
 
@@ -154,6 +154,7 @@ python3 tools/svn_fixture.py open log
 - 用 `nvim -d` 检查变更。
 - 右侧提供 inline diff 预览；未版本控制或无法生成 diff 的条目保留文件预览。
 - 主列表底部保留最近一次 SVN 操作的完整输出，便于回看 update / commit / revert 等命令结果。
+- SVN commit 和目录级 cleanup 操作使用可滚动的命令运行弹窗，支持运行中取消和完成后回看输出。
 - 主界面按 `l` 打开最近日志全屏界面。
 - 状态列表按 `z` 打开当前条目的操作菜单，按 `Z` 打开勾选条目或当前目录的操作菜单。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
@@ -194,7 +195,7 @@ python3 tools/svn_fixture.py open log
 | `b` | 用只读 `nvim` 打开当前条目的 `svn blame` |
 | `l` | 打开最近日志界面 |
 | `z` | 打开当前条目的操作菜单 |
-| `Z` | 打开勾选条目的操作菜单；没有勾选时显示目录级操作，勾选一个条目时等同于当前条目菜单 |
+| `Z` | 打开勾选条目的操作菜单；没有勾选时显示目录级操作 |
 | `/` | 显示并聚焦状态列表下方的搜索栏 |
 | `n` / `N` | 跳到下一个 / 上一个搜索匹配 |
 | `r` | 刷新 `svn st` |
@@ -215,16 +216,22 @@ python3 tools/svn_fixture.py open log
 - `u     Update`：执行 `svn update -- <path>`，完成后刷新状态列表。
 - `r     Revert`：执行 `svn revert -- <path>`，完成后刷新状态列表。
 
-按 `Z` 会对勾选条目打开操作菜单。未勾选任何条目时只显示目录级操作；只勾选一个条目时显示与 `z` 相同的单条目菜单；勾选多个条目时显示批量操作和目录级操作：
+按 `Z` 会对勾选条目打开操作菜单。未勾选任何条目时只显示目录级操作；只要勾选了条目，就显示批量操作和目录级操作：
 
 - `u     Update`：批量执行 `svn update -- <paths>`。
-- `c     Commit`：打开提交信息弹窗并提交勾选条目。
+- `c     Commit`：打开提交信息弹窗，确认后用命令运行弹窗提交勾选条目。
 - `r     Revert`：批量执行 `svn revert -- <paths>`。
 - `y/Y   Copy`：复制所有勾选条目的完整本地路径，每行一个。
 - `U     Update this Directory`：对当前 Status 目录执行 `svn update -- <directory>`。
 - `R     Revert this Directory`：对当前 Status 目录执行 `svn revert -- <directory>`。
+- `C     Clean Up this Directory`：打开命令运行弹窗并执行 `svn cleanup -- <directory>`。
+- `X     Remove Unversioned...`：确认后打开命令运行弹窗并执行 `svn cleanup --remove-unversioned -- <directory>`。
 
 菜单内 `j` / `k` 移动，`Enter` 触发当前菜单项，`Esc` 关闭菜单。
+
+### SVN Command Dialog
+
+提交和目录级 cleanup 操作会打开 SVN 命令运行弹窗。弹窗上方显示将要执行的命令，下方滚动显示 stdout/stderr 合并后的实时输出。运行中按 `Esc` 会先进入取消确认；命令结束或取消后，按 `Esc` 关闭弹窗。关闭后状态列表会刷新，完整输出也会同步到底部 Output 面板。
 
 ## Log View
 

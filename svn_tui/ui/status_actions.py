@@ -56,6 +56,8 @@ RESOLVE_WORKING_STATUS_ACTION = StatusAction("resolve", "s", "Resolve Working")
 DIRECTORY_STATUS_ACTIONS = [
     StatusAction("update_directory", "U", "Update this Directory"),
     StatusAction("revert_directory", "R", "Revert this Directory"),
+    StatusAction("cleanup_directory", "C", "Clean Up this Directory"),
+    StatusAction("remove_unversioned_directory", "X", "Remove Unversioned..."),
 ]
 
 

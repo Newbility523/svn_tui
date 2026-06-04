@@ -45,6 +45,8 @@ class StatusActionTests(unittest.TestCase):
                 "y/Y   Copy",
                 "U     Update this Directory",
                 "R     Revert this Directory",
+                "C     Clean Up this Directory",
+                "X     Remove Unversioned...",
             ],
         )
 
@@ -56,6 +58,8 @@ class StatusActionTests(unittest.TestCase):
             [
                 "U     Update this Directory",
                 "R     Revert this Directory",
+                "C     Clean Up this Directory",
+                "X     Remove Unversioned...",
             ],
         )
 
@@ -90,6 +94,14 @@ class StatusActionTests(unittest.TestCase):
         self.assertEqual(
             status_action_for_key("R", BATCH_STATUS_ACTIONS).option_id,
             "revert_directory",
+        )
+        self.assertEqual(
+            status_action_for_key("C", BATCH_STATUS_ACTIONS).option_id,
+            "cleanup_directory",
+        )
+        self.assertEqual(
+            status_action_for_key("X", BATCH_STATUS_ACTIONS).option_id,
+            "remove_unversioned_directory",
         )
 
     def test_option_lookup_returns_action(self) -> None:
