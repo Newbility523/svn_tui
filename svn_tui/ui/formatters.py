@@ -321,7 +321,7 @@ def format_help_text() -> Text:
         ("Space in visual", "Invert checked state for every entry in the range"),
         ("z", "Open actions for the current entry"),
         ("Z", "Open actions for checked entries or the current directory"),
-        ("Ctrl+Enter", "Commit from the commit message dialog"),
+        ("Ctrl+Enter", "Confirm dialogs or commit from the message dialog"),
         ("Enter / d", "Open the current entry in nvim diff"),
         ("b", "Open svn blame for the current entry in read-only nvim"),
         ("j / k", "Move selection down or up"),

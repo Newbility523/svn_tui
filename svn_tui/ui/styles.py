@@ -171,7 +171,7 @@ APP_CSS = """
     }
 
     #confirm-ok {
-        width: 16;
+        width: 24;
     }
 
     HelpDialog {
@@ -218,7 +218,7 @@ APP_CSS = """
     }
 
     #svn-command-top {
-        height: 5;
+        height: 7;
         margin-top: 1;
         border: solid $surface-lighten-1;
     }
@@ -233,7 +233,11 @@ APP_CSS = """
 
     #svn-command-command {
         height: 1fr;
-        padding: 1;
+        padding: 0 1;
+        overflow-x: auto;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 1;
     }
 
     #svn-command-bottom {
@@ -282,7 +286,7 @@ APP_CSS = """
     }
 
     #svn-command-confirm-cancel {
-        width: 20;
+        width: 30;
     }
 
     #svn-command-cancel {

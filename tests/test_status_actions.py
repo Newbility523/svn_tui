@@ -10,6 +10,7 @@ from svn_tui.ui.status_actions import (
     DIRECTORY_STATUS_ACTIONS,
     SINGLE_STATUS_ACTIONS,
     STATUS_ACTION_KEY_STYLE,
+    batch_status_actions_for_entries,
     single_status_actions_for_entry,
     status_action_for_key,
     status_action_for_option,
@@ -49,6 +50,42 @@ class StatusActionTests(unittest.TestCase):
                 "X     Remove Unversioned...",
             ],
         )
+
+    def test_batch_menu_includes_add_when_any_entry_is_unversioned(self) -> None:
+        actions = batch_status_actions_for_entries(
+            [
+                SvnStatusEntry(Path("README.md"), "M", " ", "M"),
+                SvnStatusEntry(Path("new.txt"), "?", " ", "?"),
+            ]
+        )
+
+        labels = [action.menu_label for action in actions]
+
+        self.assertEqual(
+            labels,
+            [
+                "a     Add",
+                "u     Update",
+                "c     Commit",
+                "r     Revert",
+                "y/Y   Copy",
+                "U     Update this Directory",
+                "R     Revert this Directory",
+                "C     Clean Up this Directory",
+                "X     Remove Unversioned...",
+            ],
+        )
+        self.assertEqual(status_action_for_key("a", actions).option_id, "add")
+
+    def test_batch_menu_hides_add_when_no_entry_is_unversioned(self) -> None:
+        actions = batch_status_actions_for_entries(
+            [
+                SvnStatusEntry(Path("README.md"), "M", " ", "M"),
+                SvnStatusEntry(Path("main.py"), "M", " ", "M"),
+            ]
+        )
+
+        self.assertEqual(actions, BATCH_STATUS_ACTIONS)
 
     def test_directory_menu_only_contains_directory_actions(self) -> None:
         labels = [action.menu_label for action in DIRECTORY_STATUS_ACTIONS]

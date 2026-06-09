@@ -280,6 +280,87 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.status_action_menu.styles.height.value, len(labels))
             self.assertEqual(screen.status_action_rows, [first, second])
 
+    async def test_checked_action_menu_includes_add_for_unversioned_rows(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            first = StatusRow(
+                SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M"),
+                Path(".").resolve(),
+            )
+            second = StatusRow(
+                SvnStatusEntry(Path("new.txt").resolve(), "?", " ", "?"),
+                Path(".").resolve(),
+            )
+            first.selected_for_commit = True
+            second.selected_for_commit = True
+            await screen.list_view.clear()
+            await screen.list_view.append(first)
+            await screen.list_view.append(second)
+            screen.list_view.index = 0
+            screen.list_view.focus()
+
+            await pilot.press("Z")
+            await pilot.pause(0.1)
+
+            labels = [
+                label_plain_text(child.query_one("Label"))
+                for child in screen.status_action_menu.children
+            ]
+            self.assertEqual(
+                labels,
+                [
+                    "a     Add",
+                    "u     Update",
+                    "c     Commit",
+                    "r     Revert",
+                    "y/Y   Copy",
+                    "U     Update this Directory",
+                    "R     Revert this Directory",
+                    "C     Clean Up this Directory",
+                    "X     Remove Unversioned...",
+                ],
+            )
+            self.assertEqual(screen.status_action_title.content, "Multi")
+            self.assertEqual(screen.status_action_rows, [first, second])
+
+    async def test_checked_action_menu_lowercase_a_adds_only_unversioned_rows(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            first = StatusRow(
+                SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M"),
+                Path(".").resolve(),
+            )
+            second = StatusRow(
+                SvnStatusEntry(Path("new.txt").resolve(), "?", " ", "?"),
+                Path(".").resolve(),
+            )
+            first.selected_for_commit = True
+            second.selected_for_commit = True
+            await screen.list_view.clear()
+            await screen.list_view.append(first)
+            await screen.list_view.append(second)
+            screen.list_view.index = 0
+            screen.list_view.focus()
+            added = []
+
+            async def fake_add_rows(rows):
+                added.extend(rows)
+
+            screen.add_rows = fake_add_rows
+
+            await pilot.press("Z")
+            await pilot.press("a")
+            await pilot.pause(0.1)
+
+            self.assertEqual(added, [second])
+            self.assertFalse(screen.status_action_popup.display)
+
     async def test_direct_c_does_not_open_commit_dialog(self) -> None:
         app = SvnTui(Path("."))
 

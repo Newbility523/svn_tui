@@ -52,9 +52,10 @@ from svn_tui.ui.navigation import NavigationBar
 from svn_tui.ui.screens.log import LogScreen
 from svn_tui.ui.search import find_list_match, list_match_position, status_row_search_text
 from svn_tui.ui.status_actions import (
-    BATCH_STATUS_ACTIONS,
     DIRECTORY_STATUS_ACTIONS,
     StatusAction,
+    batch_status_actions_for_entries,
+    is_addable_entry,
     single_status_actions_for_entry,
     status_action_for_key,
 )
@@ -215,7 +216,10 @@ class StatusScreen(Screen[None]):
         if not rows:
             await self.open_status_action_menu([], DIRECTORY_STATUS_ACTIONS)
             return
-        await self.open_status_action_menu(rows, BATCH_STATUS_ACTIONS)
+        await self.open_status_action_menu(
+            rows,
+            batch_status_actions_for_entries([row.entry for row in rows]),
+        )
 
     async def open_status_action_menu(
         self,
@@ -359,7 +363,9 @@ class StatusScreen(Screen[None]):
             return
         if option_id == "add":
             self.hide_status_action_menu()
-            asyncio.create_task(self.add_rows(rows))
+            addable_rows = [row for row in rows if is_addable_entry(row.entry)]
+            if addable_rows:
+                asyncio.create_task(self.add_rows(addable_rows))
             return
         if option_id == "ignore":
             self.hide_status_action_menu()

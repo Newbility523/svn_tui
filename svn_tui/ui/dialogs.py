@@ -4,14 +4,22 @@ import asyncio
 import shlex
 from dataclasses import dataclass
 
+from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, Log, Static, TextArea
+from textual.widgets import Button, Label, RichLog, Static, TextArea
 
 from svn_tui.ui.formatters import format_help_text
+
+
+CONFIRM_KEYS = "ctrl+enter,ctrl+j"
+CONFIRM_KEY_LABEL = "Ctrl+Enter"
+CANCEL_KEYS = "escape"
+CANCEL_KEY_LABEL = "Esc"
+ERROR_OUTPUT_STYLE = "bold red"
 
 
 @dataclass(frozen=True)
@@ -29,8 +37,8 @@ class SvnCommandResult:
 
 class CommitMessageDialog(ModalScreen[str | None]):
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+enter", "submit", "Commit"),
+        Binding(CANCEL_KEYS, "cancel", "Cancel", key_display=CANCEL_KEY_LABEL),
+        Binding(CONFIRM_KEYS, "submit", "Commit", key_display=CONFIRM_KEY_LABEL),
     ]
 
     def __init__(self, file_count: int) -> None:
@@ -47,8 +55,12 @@ class CommitMessageDialog(ModalScreen[str | None]):
                 placeholder="Enter commit message",
             )
             with Horizontal(id="commit-actions"):
-                yield Button("Esc Cancel", id="commit-cancel")
-                yield Button("Ctrl+Enter Commit", variant="success", id="commit-confirm")
+                yield Button(f"{CANCEL_KEY_LABEL} Cancel", id="commit-cancel")
+                yield Button(
+                    f"{CONFIRM_KEY_LABEL} Commit",
+                    variant="success",
+                    id="commit-confirm",
+                )
 
     def on_mount(self) -> None:
         self.query_one("#commit-message", TextArea).focus()
@@ -70,9 +82,10 @@ class CommitMessageDialog(ModalScreen[str | None]):
 
 class ConfirmActionDialog(ModalScreen[bool]):
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
+        Binding(CANCEL_KEYS, "cancel", "Cancel", key_display=CANCEL_KEY_LABEL),
         Binding("n", "cancel", "Cancel", show=False),
-        Binding("y", "confirm", "Confirm"),
+        Binding(CONFIRM_KEYS, "confirm", "Confirm", key_display=CONFIRM_KEY_LABEL),
+        Binding("y", "confirm", "Confirm", show=False),
     ]
 
     def __init__(
@@ -92,8 +105,12 @@ class ConfirmActionDialog(ModalScreen[bool]):
             yield Label(self.dialog_title, id="confirm-title")
             yield Static(self.message, id="confirm-message")
             with Horizontal(id="confirm-actions"):
-                yield Button("Esc Cancel", id="confirm-cancel")
-                yield Button(f"y {self.confirm_label}", variant="error", id="confirm-ok")
+                yield Button(f"{CANCEL_KEY_LABEL} Cancel", id="confirm-cancel")
+                yield Button(
+                    f"{CONFIRM_KEY_LABEL} {self.confirm_label}",
+                    variant="error",
+                    id="confirm-ok",
+                )
 
     def on_mount(self) -> None:
         self.query_one("#confirm-cancel", Button).focus()
@@ -128,7 +145,10 @@ class HelpDialog(ModalScreen[None]):
 
 class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
     BINDINGS = [
-        Binding("escape", "cancel_or_close", "Cancel"),
+        Binding(CANCEL_KEYS, "cancel_or_close", "Cancel", key_display=CANCEL_KEY_LABEL),
+        Binding(CONFIRM_KEYS, "confirm", "Confirm", key_display=CONFIRM_KEY_LABEL),
+        Binding("y", "confirm", "Confirm", show=False),
+        Binding("n", "keep_running", "Keep running", show=False),
     ]
 
     def __init__(
@@ -157,21 +177,25 @@ class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
                 yield Static(self.command, id="svn-command-command")
             with Vertical(id="svn-command-bottom"):
                 yield Label("Output", id="svn-command-output-title")
-                yield Log(id="svn-command-output", highlight=False)
+                yield RichLog(id="svn-command-output", highlight=False, markup=False)
             with Horizontal(id="svn-command-actions"):
                 yield Static("Running...", id="svn-command-status")
                 yield Button("Keep Running", id="svn-command-keep-running")
                 yield Button(
-                    "Cancel Command",
+                    f"{CONFIRM_KEY_LABEL} Cancel Command",
                     id="svn-command-confirm-cancel",
                     variant="error",
                 )
-                yield Button("Esc Cancel", id="svn-command-cancel", variant="warning")
+                yield Button(
+                    f"{CANCEL_KEY_LABEL} Cancel",
+                    id="svn-command-cancel",
+                    variant="warning",
+                )
 
     def on_mount(self) -> None:
         self.query_one("#svn-command-keep-running", Button).display = False
         self.query_one("#svn-command-confirm-cancel", Button).display = False
-        self.query_one("#svn-command-output", Log).focus()
+        self.query_one("#svn-command-output", RichLog).focus()
         self.process_task = asyncio.create_task(self.run_process())
 
     def on_unmount(self) -> None:
@@ -189,18 +213,23 @@ class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
             self.process = await asyncio.create_subprocess_exec(
                 *self.args,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
             )
             assert self.process.stdout is not None
-            while True:
-                raw_line = await self.process.stdout.readline()
-                if not raw_line:
-                    break
-                self.append_output(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
+            assert self.process.stderr is not None
+            stream_tasks = [
+                asyncio.create_task(
+                    self.stream_process_output(self.process.stdout, error=False)
+                ),
+                asyncio.create_task(
+                    self.stream_process_output(self.process.stderr, error=True)
+                ),
+            ]
+            await asyncio.gather(*stream_tasks)
             return_code = await self.process.wait()
         except FileNotFoundError as exc:
             message = f"command not found: {exc.filename}"
-            self.append_output(message)
+            self.append_output(message, error=True)
             self.finish_command("Failed.", return_code=None)
             return
         except asyncio.CancelledError:
@@ -212,9 +241,30 @@ class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
             return
         self.finish_command(f"Exited with code {return_code}.", return_code=return_code)
 
-    def append_output(self, line: str) -> None:
+    async def stream_process_output(
+        self,
+        stream: asyncio.StreamReader,
+        *,
+        error: bool,
+    ) -> None:
+        while True:
+            raw_line = await stream.readline()
+            if not raw_line:
+                return
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            self.append_output(line, error=error)
+
+    @staticmethod
+    def output_renderable(line: str, *, error: bool) -> str | Text:
+        if error:
+            return Text(line, style=ERROR_OUTPUT_STYLE)
+        return line
+
+    def append_output(self, line: str, *, error: bool = False) -> None:
         self.output_lines.append(line)
-        self.query_one("#svn-command-output", Log).write_line(line)
+        self.query_one("#svn-command-output", RichLog).write(
+            self.output_renderable(line, error=error)
+        )
 
     def finish_command(
         self,
@@ -234,7 +284,11 @@ class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
             return_code=return_code,
             cancelled=cancelled,
         )
-        self.update_action_state(status, cancel_label="Esc Close", confirming=False)
+        self.update_action_state(
+            status,
+            cancel_label=f"{CANCEL_KEY_LABEL} Close",
+            confirming=False,
+        )
 
     def terminate_process(self) -> None:
         if self.process is None or self.process.returncode is not None:
@@ -250,13 +304,32 @@ class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
             return
         self.show_cancel_confirmation()
 
+    def action_confirm(self) -> None:
+        if self.confirming_cancel:
+            self.confirm_cancel_command()
+            return
+        if not self.running:
+            self.dismiss(self.result)
+
+    def action_keep_running(self) -> None:
+        if self.confirming_cancel:
+            self.clear_cancel_confirmation()
+
     def show_cancel_confirmation(self) -> None:
         self.confirming_cancel = True
-        self.update_action_state("Cancel running command?", cancel_label="Esc Back", confirming=True)
+        self.update_action_state(
+            "Cancel running command?",
+            cancel_label=f"{CANCEL_KEY_LABEL} Back",
+            confirming=True,
+        )
 
     def clear_cancel_confirmation(self) -> None:
         self.confirming_cancel = False
-        self.update_action_state("Running...", cancel_label="Esc Cancel", confirming=False)
+        self.update_action_state(
+            "Running...",
+            cancel_label=f"{CANCEL_KEY_LABEL} Cancel",
+            confirming=False,
+        )
 
     def confirm_cancel_command(self) -> None:
         self.terminate_process()
@@ -280,7 +353,7 @@ class SvnCommandDialog(ModalScreen[SvnCommandResult | None]):
             self.action_cancel_or_close()
             return
         if event.button.id == "svn-command-keep-running":
-            self.clear_cancel_confirmation()
+            self.action_keep_running()
             return
         if event.button.id == "svn-command-confirm-cancel":
             self.confirm_cancel_command()

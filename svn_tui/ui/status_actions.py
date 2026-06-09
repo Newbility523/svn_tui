@@ -73,9 +73,13 @@ BATCH_STATUS_ACTIONS = [
 STATUS_ACTIONS = SINGLE_STATUS_ACTIONS
 
 
+def is_addable_entry(entry: SvnStatusEntry) -> bool:
+    return entry.text_status == "?"
+
+
 def single_status_actions_for_entry(entry: SvnStatusEntry) -> list[StatusAction]:
     is_unversioned = entry.text_status in {"?", "I"}
-    is_addable = entry.text_status == "?"
+    is_addable = is_addable_entry(entry)
     has_conflict = entry.text_status == "C" or entry.prop_status == "C"
     is_directory = entry.path.is_dir()
     actions: list[StatusAction] = []
@@ -100,6 +104,14 @@ def single_status_actions_for_entry(entry: SvnStatusEntry) -> list[StatusAction]
         if action.option_id == "revert" and is_unversioned:
             continue
         actions.append(action)
+    return actions
+
+
+def batch_status_actions_for_entries(entries: list[SvnStatusEntry]) -> list[StatusAction]:
+    actions: list[StatusAction] = []
+    if any(is_addable_entry(entry) for entry in entries):
+        actions.append(ADD_STATUS_ACTION)
+    actions.extend(BATCH_STATUS_ACTIONS)
     return actions
 
 

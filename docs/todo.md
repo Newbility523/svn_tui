@@ -27,6 +27,143 @@
 - [x] 增加 SVN 体验测试 fixture 工具，支持一键初始化、交互式菜单、状态切换和重置。
 - [ ] 支持用户配置文件，外置 SVN/Neovim 路径、日志数量、预览阈值、主题和快捷键。
 
+## 带 Checkpoint 的 Shelves
+
+目标：提供 `svn-tui` 自己管理的本地 shelves，让用户可以把当前 SVN working copy 的本地修改按主题保存为多个版本，并在需要时恢复、导出或清理。该功能不写入 SVN 仓库，也不直接写入 `.svn` 内部目录。
+
+### 产品术语
+
+- `Shelf`：一组本地修改的主题容器，例如 `fix-login-flow`。
+- `Save Checkpoint`：保存当前勾选修改为 shelf 的一个新版本，但保留 working copy 当前修改。
+- `Shelve Selected`：保存当前勾选修改为 shelf 的一个新版本，然后只还原/清空这些勾选路径。
+- `Unshelve Version`：从某个 shelf version 恢复修改到当前 working copy；语义是把该 version 记录的路径恢复成保存时的内容。
+- `Patch`：某个 shelf version 的文本 diff 载体，可用于导出或恢复文本修改。
+
+### 设计原则
+
+- 默认按 working copy 隔离 shelves，避免两个 checkout 互相误恢复。
+- 不直接写 `.svn`，避免依赖 SVN/TortoiseSVN 内部私有格式。
+- 允许识别同仓库同路径的 compatible shelves，但默认不混在当前 working copy 列表里。
+- `Save Checkpoint` 和 `Shelve Selected` 都创建版本；区别只在保存后是否清空勾选路径。
+- `Shelve Selected` 只处理用户勾选的路径，不隐式处理整个 status 目录。
+- `Unshelve Version` 可以选择任意版本，包括由 `Shelve Selected` 创建的版本。
+- `Unshelve Version` 只处理该 version 记录的路径；其它本地修改不受影响。
+- 初版只支持已版本控制文件的文本修改；未版本文件、二进制文件和复杂树变更进入后续阶段。
+
+### 默认存储方案
+
+默认保存到应用本地数据目录：
+
+```text
+%LOCALAPPDATA%\svn-tui\shelves\<wc-fingerprint>\
+  <shelf-name>\
+    shelf.json
+    v001\
+      patch.diff
+      meta.json
+    v002\
+      patch.diff
+      meta.json
+```
+
+类 Unix 环境对应：
+
+```text
+~/.local/share/svn-tui/shelves/<wc-fingerprint>/
+```
+
+`wc-fingerprint` 建议由以下信息生成：
+
+- working copy root 绝对路径。
+- SVN repository UUID。
+- repository root URL。
+- target URL / target relative path。
+
+`meta.json` 至少记录：
+
+- shelf 名称、版本号、版本类型（checkpoint/shelve）。
+- 创建时间、用户备注、working copy root。
+- repo UUID、repo root URL、target relative path、base revision。
+- 保存时包含的路径列表和 SVN 状态摘要。
+- patch 文件路径，以及未来扩展的文件副本索引。
+
+### 交互入口
+
+状态界面操作菜单增加 `Open Shelves` 入口。该入口只打开管理界面，不会保存、还原或修改 working copy：
+
+```text
+Z / Actions
+  Open Shelves
+```
+
+进入独立的 `ShelfManagerScreen` 后，建议提供三栏信息：
+
+```text
+Shelves
+  fix-login-flow        v4   Shelved      5 files   2026-06-10 16:20
+  cleanup-before-merge  v2   Checkpoint   2 files   2026-06-09 18:12
+
+Versions
+  v4  Shelve       5 files   saved and reverted
+  v3  Checkpoint   5 files   kept in working copy
+  v2  Checkpoint   4 files
+  v1  Checkpoint   3 files
+```
+
+核心操作：
+
+- `New Shelf`：输入名称，创建新 shelf 并保存第一个版本。
+- `Save Checkpoint`：对当前 shelf 保存新版本，工作区不变。
+- `Shelve Selected`：对当前 shelf 保存新版本，然后只还原当前勾选路径。
+- `Unshelve Version`：选择 shelf version，先还原该 version 记录的路径，再应用该 version 的 patch；不处理 version 之外的其它本地修改。
+- `Export Patch`：把选中 version 导出为 `.patch` / `.diff`。
+- `Rename Shelf`：重命名 shelf。
+- `Delete Version`：删除单个版本。
+- `Delete Shelf`：删除整个 shelf，需二次确认。
+- `Open Folder` / `Copy Path`：方便用户定位本地存储。
+
+### 第一阶段范围
+
+- [ ] 新增 shelf 存储服务，负责 app data 路径、working copy fingerprint、目录结构和 JSON 元数据读写。
+- [ ] 新增 `svn diff` patch 生成服务，支持保存当前勾选路径的已版本控制文本修改。
+- [ ] 新增 `New Shelf` 操作：创建 shelf，并允许立即保存第一个 checkpoint。
+- [ ] 新增 `Save Checkpoint` 操作：保存 patch 和 metadata，不修改 working copy。
+- [ ] 新增 `Shelve Selected` 操作：保存 patch 和 metadata 后，只对当前勾选路径执行安全还原。
+- [ ] 新增 `Unshelve Version` 操作：选择版本后，只针对该 version 记录的路径执行 revert + apply patch。
+- [ ] 新增独立 `ShelfManagerScreen`，能列出当前 working copy 的 shelves 和 versions。
+- [ ] 在状态菜单中增加 `Open Shelves` 入口，该入口只打开管理界面。
+- [ ] 增加确认弹窗，覆盖 `Shelve Selected` 清空勾选修改、`Unshelve Version` 覆盖当前修改、删除版本/删除 shelf。
+- [ ] 更新 README 和架构文档，说明 shelves 与 patches 的区别。
+- [ ] 增加 fixture 状态和测试，覆盖 save checkpoint、shelve selected、unshelve version 的基本链路。
+
+### 后续阶段
+
+- [ ] 支持未版本文件保存：为未版本文件保存副本并在 unshelve 时恢复。
+- [ ] 支持二进制文件保存：保存完整副本，而不是只依赖文本 patch。
+- [ ] 支持删除、移动、复制等复杂树变更的更完整恢复。
+- [ ] 支持显示 compatible shelves：同 repo UUID + target relpath，但来自其它 working copy。
+- [ ] 支持从其它 working copy 导入 compatible shelf。
+- [ ] 支持清理过期 shelves 或限制保留版本数量。
+- [ ] 支持用户配置 shelves 存储位置。
+
+### 风险与约束
+
+- `svn diff` 不能完整表达所有工作区状态，初版需要明确只保证文本 diff 主路径。
+- `Shelve Selected` 的清空动作必须非常谨慎，只还原本次保存涉及的勾选路径。
+- `Unshelve Version` 如果发现该 version 记录的路径当前已有本地修改，必须提示这些路径上的当前修改会被丢弃；用户确认后再执行，不确认则不做任何修改。
+- `Unshelve Version` 不检查也不处理该 version 路径之外的其它本地修改。
+- patch 应用失败时需要保留错误输出，并指引用户手动处理。
+- compatible shelves 不能默认自动混用，否则两个 checkout 之间容易误恢复。
+
+### 待确认
+
+- [x] 初版只支持“已版本控制文本修改”，把未版本文件和二进制文件放到后续阶段。
+- [x] `Shelve Selected` 清空工作区时，只还原勾选路径，不处理整个当前 status 目录。
+- [x] 状态菜单入口命名为 `Open Shelves`，只负责打开管理界面，不直接保存或还原。
+- [x] `Shelf Manager` 做成独立 Screen，类似 `LogScreen` 的完整页面，而不是嵌在 log 或弹窗里。
+- [ ] 默认 shelf 名称是否要求用户输入，还是提供自动名称后允许重命名。
+- [x] `Unshelve Version` 以选中 version 为准；如果 version 路径当前已有本地修改，确认后丢弃这些路径上的当前修改并应用 version，不碰其它路径。
+
 ## Ranger 联动模式
 
 目标：支持从 ranger 选中文件或目录后启动 `svn-tui` 的 status 或 log 界面，处理完成后退出并自然回到 ranger。
