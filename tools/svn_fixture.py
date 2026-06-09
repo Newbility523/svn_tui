@@ -301,6 +301,23 @@ def apply_large_preview(ctx: FixtureContext) -> None:
     write_bytes(wc / "preview" / "binary-unversioned.bin", bytes(range(256)) * 24)
 
 
+def apply_shelves_ready(ctx: FixtureContext) -> None:
+    wc = ctx.paths.wc
+    append_text(
+        wc / "src" / "app.py",
+        "\ndef shelf_checkpoint_label():\n    return 'checkpoint candidate'\n",
+    )
+    append_text(
+        wc / "docs" / "guide.md",
+        "\nShelves fixture note: save this as a checkpoint, then shelve it.\n",
+    )
+    write_bytes(wc / "preview" / "image.bin", bytes(range(255, -1, -1)) * 2)
+    write_text(
+        wc / "shelf-unversioned-note.txt",
+        "Unversioned files are intentionally outside the first shelves phase.\n",
+    )
+
+
 def apply_conflict(ctx: FixtureContext) -> None:
     wc = ctx.paths.wc
     actor_wc = ctx.paths.actor_wc
@@ -333,6 +350,11 @@ STATES: dict[str, State] = {
         "large-preview",
         "Large text, long-line, binary, and modified preview samples.",
         apply_large_preview,
+    ),
+    "shelves-ready": State(
+        "shelves-ready",
+        "Versioned text changes for checkpoint, shelve, and unshelve testing.",
+        apply_shelves_ready,
     ),
     "conflict": State(
         "conflict",

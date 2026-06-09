@@ -26,7 +26,7 @@ main.py
 - `svn_tui/app.py`：Textual App 外壳，只保留全局行为、全局快捷键和首屏选择。
 - `svn_tui/config.py`：集中管理预览阈值、列宽、日志条数、滚动间隔和主题配置。
 - `svn_tui/models.py`：保存 SVN 状态、日志、日志路径等业务数据结构。
-- `svn_tui/services/`：工具层，负责 SVN 命令、diff/blame、日志读取、文件预览索引。
+- `svn_tui/services/`：工具层，负责 SVN 命令、diff/blame、日志读取、文件预览索引和本地 shelves 存储。
 - `svn_tui/ui/screens/`：界面层，每个 Screen 对应一个完整界面。
 - `svn_tui/ui/widgets.py`：可复用组件，包括状态行、日志行、路径行、预览视图、弹出菜单项。
 - `svn_tui/ui/formatters.py`：界面文本格式化、列宽计算、路径截断、中文 cell 宽度处理。
@@ -46,7 +46,8 @@ main.py
 8. 当前行变化后，右侧 `PreviewView` 延迟 200ms 加载预览，避免快速移动时频繁读文件。
 9. 预览服务按文件大小决定完整索引、后台补全索引或只显示前缀内容。
 10. 用户勾选条目后按 `Z` 打开批量菜单，再通过 `Commit` 输入提交说明，`SvnCommandDialog` 执行 `svn commit -m <message> -- <paths>` 并展示实时输出。
-11. 提交完成后重新加载状态列表。
+11. 用户通过 `Open Shelves` 进入 `ShelfManagerScreen` 时，状态界面的勾选条目会作为待保存路径传入 shelf 管理界面。
+12. 提交、shelve、unshelve 等会改变工作区的操作完成后重新加载状态列表。
 
 ## Diff 和 Blame 链路
 
@@ -70,6 +71,42 @@ main.py
 9. `Remove Unversioned...` 会先打开确认弹窗，确认后再执行 `svn cleanup --remove-unversioned -- <directory>`。
 10. `Commit`、`Clean Up this Directory` 和 `Remove Unversioned...` 使用 SVN 命令运行弹窗，实时展示 stdout/stderr，支持运行中取消。
 11. 提交、更新、还原和 cleanup 操作完成后刷新状态列表。
+
+## Shelves 链路
+
+Shelves 是应用自己的本地数据，不写入 SVN 仓库，也不写入 `.svn` 内部目录。默认存储位置由 `svn_tui/services/shelves.py` 管理：
+
+```text
+%LOCALAPPDATA%\svn-tui\shelves\<wc-fingerprint>\
+  <shelf-storage-id>\
+    shelf.json
+    v001\
+      meta.json
+      patch.diff
+```
+
+类 Unix 环境使用 `XDG_DATA_HOME`，否则退回 `~/.local/share/svn-tui/shelves/`。
+
+`wc-fingerprint` 使用 working copy root、SVN repository UUID、repository root URL 和目标相对路径生成。这样同一个仓库 checkout 两份时，两个工作区的 shelves 默认不会混在一起，避免误恢复。
+
+核心对象：
+
+- `Shelf`：一组本地修改版本的主题容器，例如 `fix-login-flow`。
+- `ShelfVersion`：某个 shelf 的一次保存记录，类型是 `checkpoint` 或 `shelve`。
+- `Patch`：某个 version 下的 `patch.diff`，是恢复文本修改的载体；它不是独立的业务容器。
+
+操作链路：
+
+1. Status 界面按 `z` 或 `Z` 后选择 `Open Shelves`，只打开 `ShelfManagerScreen`，不保存、不还原、不修改工作区。
+2. `ShelfManagerScreen` 调用 `build_shelf_workspace()` 读取工作副本根目录、仓库 UUID、root URL、目标路径和当前 revision，用这些信息定位当前 working copy 的 shelf 存储目录。
+3. 左侧显示当前勾选条目中过滤后的 shelfable entries。初版只接受已版本控制文件的文本修改；未版本控制、忽略、冲突和目录条目不会进入保存链路。
+4. `New Shelf` 要求用户输入名称，然后把当前 shelfable entries 通过 `svn diff -- <paths>` 保存为第一个 checkpoint。该操作不修改 working copy。
+5. `Save Checkpoint` 对当前 shelf 新增一个 `checkpoint` version，写入 `patch.diff` 和 `meta.json`，不修改 working copy。
+6. `Shelve Selected` 先新增一个 `shelve` version，然后只对该 version 记录的路径执行 `svn revert -- <paths>`。未勾选的其它本地修改不受影响。
+7. `Unshelve Version` 以选中的 version 为准。执行前先检查该 version 记录路径上的当前 status；如果这些路径已有本地修改，必须确认会丢弃这些路径上的当前修改。确认后先 revert 这些路径，再执行 `svn patch <patch.diff> .`。
+8. `Delete Version` 和 `Delete Shelf` 都通过确认弹窗保护，其中删除 shelf 会删除该 shelf 的所有 version 目录。
+
+patch 应用失败时，`svn patch` 的错误输出会保留在通知里；此时工作区可能已经对 version 路径执行过 revert，后续需要用户按错误信息手动处理。
 
 ## SVN 命令运行弹窗
 

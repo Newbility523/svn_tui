@@ -283,9 +283,19 @@ def shelfable_entries(entries: list[SvnStatusEntry]) -> list[SvnStatusEntry]:
 def is_shelfable_entry(entry: SvnStatusEntry) -> bool:
     if entry.path.exists() and entry.path.is_dir():
         return False
+    if entry.path.exists() and looks_like_binary_file(entry.path):
+        return False
     if entry.text_status in {"?", "I", "C"} or entry.prop_status == "C":
         return False
     return entry.text_status.strip() != "" or entry.prop_status.strip() != ""
+
+
+def looks_like_binary_file(path: Path) -> bool:
+    try:
+        sample = path.read_bytes()[:4096]
+    except OSError:
+        return False
+    return b"\0" in sample
 
 
 def shelf_sort_key(shelf: Shelf) -> str:

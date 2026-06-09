@@ -49,6 +49,21 @@ svn-tui --screen log /path/to/item
 
 列表中的路径相对传入的打开路径显示。例如打开 `a/b/c` 时，文件 `a/b/c/d.py` 会显示为 `d.py`。
 
+## Shelves
+
+Shelves 是 `svn-tui` 自己管理的本地暂存区，不写入 SVN 仓库，也不写入 `.svn` 内部目录。它按 working copy 隔离保存到本机应用数据目录，例如 Windows 下的 `%LOCALAPPDATA%\svn-tui\shelves\<wc-fingerprint>\`。
+
+在 Status 界面勾选要处理的已版本控制文本修改后，按 `Z` 打开批量菜单，再选择 `Open Shelves` 进入独立的 Shelf Manager。`Open Shelves` 只打开管理界面，不会立即保存或还原任何内容。
+
+Shelf Manager 的核心操作：
+
+- `New Shelf`：输入 shelf 名称，并把当前勾选修改保存为第一个 checkpoint；工作区修改保留。
+- `Save Checkpoint`：给当前 shelf 保存一个新版本；工作区修改保留。
+- `Shelve Selected`：给当前 shelf 保存一个新版本，然后只还原本次勾选路径。
+- `Unshelve Version`：选择任意版本后，只还原该版本记录的路径，再应用该版本的 patch；其它路径的本地修改不受影响。
+
+`Shelf` 是一组版本的主题容器，例如 `fix-login-flow`；`Patch` 是某个 shelf version 里的文本 diff 文件，用来恢复该版本的文本修改。初版只支持已版本控制文件的文本修改；未版本控制文件、二进制文件和复杂树变更会放到后续阶段。
+
 ## Ranger Integration
 
 `svn-tui` 不能嵌入 ranger 进程内部。推荐做法是在 ranger 快捷键中启动外部 TUI，退出 `svn-tui` 后自然回到 ranger。
@@ -98,6 +113,7 @@ svn-tui status .dev/svn-fixture/wc
 python3 tools/svn_fixture.py list
 python3 tools/svn_fixture.py reset
 python3 tools/svn_fixture.py state commit-ready
+python3 tools/svn_fixture.py state shelves-ready
 python3 tools/svn_fixture.py state conflict
 python3 tools/svn_fixture.py state large-preview
 python3 tools/svn_fixture.py open status
@@ -124,10 +140,11 @@ python3 tools/svn_fixture.py open log
 - `svn_tui/config.py`：预览、列表列宽、日志数量、滚动间隔、主题等全局配置。
 - `svn_tui/models.py`：SVN 状态、日志、日志路径等业务数据结构。
 - `svn_tui/services/`：SVN 命令调用和文件预览索引等工具层，不依赖具体界面。
+- `svn_tui/services/shelves.py`：本地 shelves 存储、working copy fingerprint、version metadata 和 patch 管理。
 - `svn_tui/ui/styles.py`：Textual CSS 布局和样式。
 - `svn_tui/ui/widgets.py`：可复用 UI 组件和列表行渲染。
 - `svn_tui/ui/dialogs.py`：提交信息、帮助等弹窗。
-- `svn_tui/ui/screens/`：不同界面 Screen，目前包含状态界面和日志界面。
+- `svn_tui/ui/screens/`：不同界面 Screen，目前包含状态界面、日志界面和 Shelf Manager。
 - `svn_tui/ui/formatters.py`、`svn_tui/ui/search.py`：界面展示格式化和列表搜索逻辑。
 - `svn_tui/utils/`：路径、大小格式化等跨层小工具。
 
@@ -142,7 +159,8 @@ python3 tools/svn_fixture.py open log
 3. 状态列表将 `SvnStatusEntry` 渲染为可勾选行，右侧按当前行延迟加载只读预览。
 4. 用户勾选文件后输入提交说明，`SvnCommandDialog` 执行 `svn commit` 并展示实时输出，完成后刷新状态。
 5. 用户打开 diff / blame 时暂停 Textual，交给真实 `nvim` 处理交互。
-6. 用户进入 `LogScreen` 后，`SvnClient.recent_logs()` 读取仓库日志，选中 revision/path 后再异步加载 `svn diff`。
+6. 用户打开 `ShelfManagerScreen` 后，可以把勾选的已版本控制文本修改保存为 checkpoint，或保存后只还原勾选路径。
+7. 用户进入 `LogScreen` 后，`SvnClient.recent_logs()` 读取仓库日志，选中 revision/path 后再异步加载 `svn diff`。
 
 ## Features
 
@@ -157,6 +175,7 @@ python3 tools/svn_fixture.py open log
 - SVN commit 和目录级 cleanup 操作使用可滚动的命令运行弹窗，支持运行中取消和完成后回看输出。
 - 主界面按 `l` 打开最近日志全屏界面。
 - 状态列表按 `z` 打开当前条目的操作菜单，按 `Z` 打开勾选条目或当前目录的操作菜单。
+- 状态操作菜单提供 `Open Shelves`，打开独立 Shelf Manager 管理 checkpoint / shelve / unshelve。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
 - CLI 支持直接打开 status 或 log 初始界面，方便 ranger 等外部工具调用。
 - 日志界面支持查看 revision 列表、提交说明、变更路径列表，以及单文件历史 diff 预览。
@@ -213,6 +232,7 @@ python3 tools/svn_fixture.py open log
 - `d/D   Diff Base`：用 `nvim -d` 对比 `BASE` 与工作副本。
 - `h/H   Diff Head`：用 `nvim -d` 对比 `HEAD` 与工作副本。
 - `y/Y   Copy`：复制当前条目的完整本地路径。
+- `S     Open Shelves`：打开 Shelf Manager，不保存或还原修改。
 - `u     Update`：执行 `svn update -- <path>`，完成后刷新状态列表。
 - `r     Revert`：执行 `svn revert -- <path>`，完成后刷新状态列表。
 
@@ -222,12 +242,34 @@ python3 tools/svn_fixture.py open log
 - `c     Commit`：打开提交信息弹窗，确认后用命令运行弹窗提交勾选条目。
 - `r     Revert`：批量执行 `svn revert -- <paths>`。
 - `y/Y   Copy`：复制所有勾选条目的完整本地路径，每行一个。
+- `S     Open Shelves`：打开 Shelf Manager，后续在独立界面中选择保存 checkpoint、shelve 或 unshelve。
 - `U     Update this Directory`：对当前 Status 目录执行 `svn update -- <directory>`。
 - `R     Revert this Directory`：对当前 Status 目录执行 `svn revert -- <directory>`。
 - `C     Clean Up this Directory`：打开命令运行弹窗并执行 `svn cleanup -- <directory>`。
 - `X     Remove Unversioned...`：确认后打开命令运行弹窗并执行 `svn cleanup --remove-unversioned -- <directory>`。
 
 菜单内 `j` / `k` 移动，`Enter` 触发当前菜单项，`Esc` 关闭菜单。
+
+### Shelf Manager Shortcuts
+
+Shelf Manager 是独立全屏界面。左侧显示当前勾选修改和 shelves，中间显示选中 shelf 的 versions，右侧显示选中 version 的 patch 预览和元数据。
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-l` | 返回 Status 界面 |
+| `Tab` / `Shift-Tab` | 在 shelves 和 versions 列表之间切换焦点 |
+| `n` | New Shelf |
+| `p` | Save Checkpoint |
+| `s` | Shelve Selected |
+| `u` | Unshelve Version |
+| `d` | Delete Version |
+| `D` | Delete Shelf |
+| `y` | Copy Patch Path |
+| `j` / `k` | 当前列表上下移动 |
+| `Ctrl-f` / `Ctrl-b` | 当前列表翻页 |
+| `Ctrl-e` / `Ctrl-y` | patch 预览向下 / 向上滚动一行 |
+| `Ctrl-d` / `Ctrl-u` | patch 预览向下 / 向上滚动半页 |
+| `Shift-Right` / `Shift-Left` | patch 预览横向滚动 |
 
 ### SVN Command Dialog
 

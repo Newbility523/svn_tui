@@ -79,15 +79,18 @@ class ShelfStorageTests(unittest.TestCase):
             unversioned = root / "new.py"
             conflict = root / "conflict.py"
             directory_path = root / "src"
+            binary = root / "image.bin"
             versioned.write_text("hello", encoding="utf-8")
             unversioned.write_text("hello", encoding="utf-8")
             conflict.write_text("hello", encoding="utf-8")
             directory_path.mkdir()
+            binary.write_bytes(b"hello\0world")
             entries = [
                 SvnStatusEntry(versioned, "M", " ", "M"),
                 SvnStatusEntry(unversioned, "?", " ", "?"),
                 SvnStatusEntry(conflict, "C", " ", "C"),
                 SvnStatusEntry(directory_path, "M", " ", "M"),
+                SvnStatusEntry(binary, "M", " ", "M"),
             ]
 
             filtered = shelfable_entries(entries)
