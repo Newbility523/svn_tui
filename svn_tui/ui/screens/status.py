@@ -50,6 +50,7 @@ from svn_tui.ui.formatters import (
 )
 from svn_tui.ui.navigation import NavigationBar
 from svn_tui.ui.screens.log import LogScreen
+from svn_tui.ui.screens.shelves import ShelfManagerScreen
 from svn_tui.ui.search import find_list_match, list_match_position, status_row_search_text
 from svn_tui.ui.status_actions import (
     DIRECTORY_STATUS_ACTIONS,
@@ -94,6 +95,7 @@ class StatusScreen(Screen[None]):
         Binding("U", "update_directory_entry", "Update directory", show=False),
         Binding("y", "copy_entry", "Copy", show=False),
         Binding("Y", "copy_entry", "Copy", show=False),
+        Binding("S", "open_shelves_entry", "Open shelves", show=False),
         Binding("R", "revert_directory_entry", "Revert directory", show=False),
         Binding("C", "cleanup_directory_entry", "Clean up directory", show=False),
         Binding(
@@ -302,6 +304,16 @@ class StatusScreen(Screen[None]):
 
     def activate_status_action(self, option_id: str) -> None:
         rows = self.status_action_rows
+        if option_id == "open_shelves":
+            self.hide_status_action_menu()
+            self.app.push_screen(
+                ShelfManagerScreen(
+                    self.client,
+                    [row.entry for row in rows],
+                    on_changed=lambda: asyncio.create_task(self.load_status()),
+                )
+            )
+            return
         if option_id == "update_directory":
             self.hide_status_action_menu()
             asyncio.create_task(
@@ -660,6 +672,11 @@ class StatusScreen(Screen[None]):
     def action_copy_entry(self) -> None:
         self.waiting_for_second_g = False
         if self.activate_status_action_hotkey("y") or self.activate_status_action_hotkey("Y"):
+            return
+
+    def action_open_shelves_entry(self) -> None:
+        self.waiting_for_second_g = False
+        if self.activate_status_action_hotkey("S"):
             return
 
     def action_revert_directory_entry(self) -> None:

@@ -11,11 +11,12 @@ from svn_tui.config import LOG_ENTRY_LIMIT
 from svn_tui.models import SvnLogEntry, SvnLogPathEntry, SvnStatusEntry
 
 
-async def run_command_text(args: list[str]) -> str:
+async def run_command_text(args: list[str], *, cwd: Path | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
     stdout, stderr = await process.communicate()
     stdout_text = stdout.decode("utf-8", errors="replace")
@@ -44,6 +45,10 @@ def build_svn_update_args(paths: list[Path]) -> list[str]:
 
 def build_svn_diff_args(paths: list[Path]) -> list[str]:
     return ["svn", "diff", "--", *(str(path) for path in paths)]
+
+
+def build_svn_patch_args(patch_file: Path, target: Path = Path(".")) -> list[str]:
+    return ["svn", "patch", str(patch_file), str(target)]
 
 
 def build_svn_revert_args(paths: list[Path]) -> list[str]:
@@ -87,6 +92,7 @@ class SvnClient:
         self.root = self.display_root
         self.root_loaded = False
         self.repo_root_url = ""
+        self.repo_uuid = ""
         self.target_url = ""
         self.target_repo_path = ""
         self.repo_info_loaded = False
@@ -111,6 +117,22 @@ class SvnClient:
                 entries.append(entry)
         return entries
 
+    async def status_paths(self, paths: list[Path]) -> list[SvnStatusEntry]:
+        await self.ensure_working_copy_root()
+        if not paths:
+            return []
+        relative_paths = [relative_to_root(path, self.root) for path in paths]
+        stdout = await run_command_text(
+            ["svn", "st", "--", *(str(path) for path in relative_paths)],
+            cwd=self.root,
+        )
+        entries: list[SvnStatusEntry] = []
+        for line in stdout.splitlines():
+            entry = parse_svn_status_line(line, self.root)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
     async def commit(self, message: str, paths: list[Path]) -> str:
         return await run_command_text(build_svn_commit_args(message, paths))
 
@@ -126,8 +148,23 @@ class SvnClient:
     async def diff_for_status_entry(self, entry: SvnStatusEntry) -> str:
         return await run_command_text(build_svn_diff_args([entry.path]))
 
+    async def diff_paths(self, paths: list[Path]) -> str:
+        await self.ensure_working_copy_root()
+        relative_paths = [relative_to_root(path, self.root) for path in paths]
+        return await run_command_text(
+            build_svn_diff_args(relative_paths),
+            cwd=self.root,
+        )
+
     async def revert_paths(self, paths: list[Path]) -> str:
         return await run_command_text(build_svn_revert_args(paths))
+
+    async def patch_file(self, patch_file: Path) -> str:
+        await self.ensure_working_copy_root()
+        return await run_command_text(
+            build_svn_patch_args(patch_file),
+            cwd=self.root,
+        )
 
     async def resolve_paths(self, paths: list[Path], accept: str = "working") -> str:
         return await run_command_text(build_svn_resolve_args(paths, accept))
@@ -156,10 +193,14 @@ class SvnClient:
         repo_root_url = await run_command_text(
             ["svn", "info", "--show-item", "repos-root-url", str(probe)]
         )
+        repo_uuid = await run_command_text(
+            ["svn", "info", "--show-item", "repos-uuid", str(probe)]
+        )
         target_url = await run_command_text(
             ["svn", "info", "--show-item", "url", str(probe)]
         )
         self.repo_root_url = repo_root_url.strip().rstrip("/")
+        self.repo_uuid = repo_uuid.strip()
         self.target_url = target_url.strip()
         if self.repo_root_url and self.target_url.startswith(self.repo_root_url):
             suffix = self.target_url[len(self.repo_root_url) :].strip("/")
@@ -167,6 +208,13 @@ class SvnClient:
         else:
             self.target_repo_path = ""
         self.repo_info_loaded = True
+
+    async def working_revision(self) -> str:
+        probe = self.target if self.target.is_dir() else self.target.parent
+        stdout = await run_command_text(
+            ["svn", "info", "--show-item", "revision", str(probe)]
+        )
+        return stdout.strip()
 
     async def recent_logs(self, limit: int = LOG_ENTRY_LIMIT) -> list[SvnLogEntry]:
         await self.ensure_repository_metadata()
@@ -356,6 +404,14 @@ def dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def relative_to_root(path: Path, root: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    try:
+        return resolved.relative_to(root)
+    except ValueError:
+        return resolved
 
 
 def append_svn_ignore_pattern(current: str, pattern: str) -> str | None:

@@ -51,9 +51,11 @@ SINGLE_STATUS_ACTIONS = [
 ADD_STATUS_ACTION = StatusAction("add", "a", "Add")
 IGNORE_STATUS_ACTION = StatusAction("ignore", "i", "Ignore")
 RESOLVE_WORKING_STATUS_ACTION = StatusAction("resolve", "s", "Resolve Working")
+OPEN_SHELVES_STATUS_ACTION = StatusAction("open_shelves", "S", "Open Shelves")
 
 
 DIRECTORY_STATUS_ACTIONS = [
+    OPEN_SHELVES_STATUS_ACTION,
     StatusAction("update_directory", "U", "Update this Directory"),
     StatusAction("revert_directory", "R", "Revert this Directory"),
     StatusAction("cleanup_directory", "C", "Clean Up this Directory"),
@@ -104,6 +106,7 @@ def single_status_actions_for_entry(entry: SvnStatusEntry) -> list[StatusAction]
         if action.option_id == "revert" and is_unversioned:
             continue
         actions.append(action)
+    actions.append(OPEN_SHELVES_STATUS_ACTION)
     return actions
 
 

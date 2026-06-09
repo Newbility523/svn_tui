@@ -12,6 +12,7 @@ from svn_tui.services.svn import (
     build_svn_cleanup_args,
     build_svn_commit_args,
     build_svn_diff_args,
+    build_svn_patch_args,
     build_svn_propget_args,
     build_svn_propset_args,
     build_svn_revert_args,
@@ -46,6 +47,12 @@ class SvnCommandTests(unittest.TestCase):
         self.assertEqual(
             build_svn_diff_args([Path("a b.txt"), Path("c.txt")]),
             ["svn", "diff", "--", "a b.txt", "c.txt"],
+        )
+
+    def test_build_svn_patch_args_targets_working_copy_root(self) -> None:
+        self.assertEqual(
+            build_svn_patch_args(Path("shelf.patch")),
+            ["svn", "patch", "shelf.patch", "."],
         )
 
     def test_build_svn_revert_args_targets_multiple_paths(self) -> None:

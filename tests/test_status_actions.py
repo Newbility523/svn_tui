@@ -44,6 +44,7 @@ class StatusActionTests(unittest.TestCase):
                 "c     Commit",
                 "r     Revert",
                 "y/Y   Copy",
+                "S     Open Shelves",
                 "U     Update this Directory",
                 "R     Revert this Directory",
                 "C     Clean Up this Directory",
@@ -69,6 +70,7 @@ class StatusActionTests(unittest.TestCase):
                 "c     Commit",
                 "r     Revert",
                 "y/Y   Copy",
+                "S     Open Shelves",
                 "U     Update this Directory",
                 "R     Revert this Directory",
                 "C     Clean Up this Directory",
@@ -93,6 +95,7 @@ class StatusActionTests(unittest.TestCase):
         self.assertEqual(
             labels,
             [
+                "S     Open Shelves",
                 "U     Update this Directory",
                 "R     Revert this Directory",
                 "C     Clean Up this Directory",
@@ -140,6 +143,10 @@ class StatusActionTests(unittest.TestCase):
             status_action_for_key("X", BATCH_STATUS_ACTIONS).option_id,
             "remove_unversioned_directory",
         )
+        self.assertEqual(
+            status_action_for_key("S", BATCH_STATUS_ACTIONS).option_id,
+            "open_shelves",
+        )
 
     def test_option_lookup_returns_action(self) -> None:
         self.assertEqual(status_action_for_option("update", BATCH_STATUS_ACTIONS).key, "u")
@@ -155,6 +162,7 @@ class StatusActionTests(unittest.TestCase):
                 "a     Add",
                 "i     Ignore",
                 "y/Y   Copy",
+                "S     Open Shelves",
             ],
         )
 
@@ -163,7 +171,7 @@ class StatusActionTests(unittest.TestCase):
 
         labels = [action.menu_label for action in single_status_actions_for_entry(entry)]
 
-        self.assertEqual(labels, ["y/Y   Copy"])
+        self.assertEqual(labels, ["y/Y   Copy", "S     Open Shelves"])
 
     def test_unversioned_add_hotkey_is_available_in_dynamic_menu(self) -> None:
         entry = SvnStatusEntry(Path("new.txt"), "?", " ", "?")
@@ -193,6 +201,7 @@ class StatusActionTests(unittest.TestCase):
                 "y/Y   Copy",
                 "u     Update",
                 "r     Revert",
+                "S     Open Shelves",
             ],
         )
 
@@ -215,6 +224,7 @@ class StatusActionTests(unittest.TestCase):
                 "y/Y   Copy",
                 "u     Update",
                 "r     Revert",
+                "S     Open Shelves",
             ],
         )
 

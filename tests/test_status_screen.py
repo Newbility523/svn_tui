@@ -10,6 +10,7 @@ from textual.widgets import Header
 from svn_tui.app import SvnTui
 from svn_tui.models import SvnStatusEntry
 from svn_tui.ui.dialogs import ConfirmActionDialog, SvnCommandDialog
+from svn_tui.ui.screens.shelves import ShelfManagerScreen
 from svn_tui.ui.widgets import StatusRow
 
 
@@ -158,6 +159,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "y/Y   Copy",
                     "u     Update",
                     "r     Revert",
+                    "S     Open Shelves",
                 ],
             )
             self.assertIsInstance(
@@ -189,6 +191,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 labels,
                 [
+                    "S     Open Shelves",
                     "U     Update this Directory",
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
@@ -224,6 +227,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "c     Commit",
                     "r     Revert",
                     "y/Y   Copy",
+                    "S     Open Shelves",
                     "U     Update this Directory",
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
@@ -270,6 +274,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "c     Commit",
                     "r     Revert",
                     "y/Y   Copy",
+                    "S     Open Shelves",
                     "U     Update this Directory",
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
@@ -317,6 +322,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "c     Commit",
                     "r     Revert",
                     "y/Y   Copy",
+                    "S     Open Shelves",
                     "U     Update this Directory",
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
@@ -415,6 +421,38 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             self.assertIsNotNone(callback)
+
+    async def test_checked_action_menu_opens_shelf_manager(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            row = StatusRow(
+                SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M"),
+                Path(".").resolve(),
+            )
+            row.selected_for_commit = True
+            await screen.list_view.clear()
+            await screen.list_view.append(row)
+            screen.list_view.index = 0
+            screen.list_view.focus()
+            pushed = []
+
+            def fake_push_screen(dialog, callback=None):
+                pushed.append((dialog, callback))
+
+            app.push_screen = fake_push_screen
+
+            await pilot.press("Z")
+            await pilot.press("S")
+            await pilot.pause(0.1)
+
+            self.assertEqual(len(pushed), 1)
+            dialog, callback = pushed[0]
+            self.assertIsInstance(dialog, ShelfManagerScreen)
+            self.assertEqual(dialog.pending_entries, [row.entry])
+            self.assertIsNone(callback)
 
     async def test_status_action_menu_navigation_takes_priority(self) -> None:
         app = SvnTui(Path("."))
@@ -545,7 +583,10 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                 label_plain_text(child.query_one("Label"))
                 for child in screen.status_action_menu.children
             ]
-            self.assertEqual(labels, ["a     Add", "i     Ignore", "y/Y   Copy"])
+            self.assertEqual(
+                labels,
+                ["a     Add", "i     Ignore", "y/Y   Copy", "S     Open Shelves"],
+            )
 
             await pilot.press("a")
             await pilot.pause(0.1)

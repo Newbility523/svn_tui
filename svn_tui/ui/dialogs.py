@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, RichLog, Static, TextArea
+from textual.widgets import Button, Input, Label, RichLog, Static, TextArea
 
 from svn_tui.ui.formatters import format_help_text
 
@@ -127,6 +127,63 @@ class ConfirmActionDialog(ModalScreen[bool]):
             return
         if event.button.id == "confirm-ok":
             self.action_confirm()
+
+
+class TextInputDialog(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding(CANCEL_KEYS, "cancel", "Cancel", key_display=CANCEL_KEY_LABEL),
+        Binding(CONFIRM_KEYS, "submit", "Confirm", key_display=CONFIRM_KEY_LABEL),
+    ]
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        placeholder: str = "",
+        confirm_label: str = "Confirm",
+    ) -> None:
+        super().__init__()
+        self.dialog_title = title
+        self.placeholder = placeholder
+        self.confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="text-input-dialog"):
+            yield Label(self.dialog_title, id="text-input-title")
+            yield Input(
+                id="text-input-value",
+                placeholder=self.placeholder,
+            )
+            with Horizontal(id="text-input-actions"):
+                yield Button(f"{CANCEL_KEY_LABEL} Cancel", id="text-input-cancel")
+                yield Button(
+                    f"{CONFIRM_KEY_LABEL} {self.confirm_label}",
+                    variant="success",
+                    id="text-input-confirm",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#text-input-value", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_submit(self) -> None:
+        value = self.query_one("#text-input-value", Input).value.strip()
+        self.dismiss(value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "text-input-value":
+            return
+        event.stop()
+        self.action_submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "text-input-cancel":
+            self.action_cancel()
+            return
+        if event.button.id == "text-input-confirm":
+            self.action_submit()
 
 
 class HelpDialog(ModalScreen[None]):

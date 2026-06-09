@@ -178,6 +178,49 @@ APP_CSS = """
         align: center middle;
     }
 
+    TextInputDialog {
+        align: center middle;
+    }
+
+    #text-input-dialog {
+        width: 68;
+        height: 10;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #text-input-title {
+        height: 1;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #text-input-value {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #text-input-actions {
+        width: 1fr;
+        height: 3;
+        align: right bottom;
+    }
+
+    #text-input-actions Button {
+        height: 3;
+        margin-left: 1;
+    }
+
+    #text-input-cancel {
+        width: 14;
+    }
+
+    #text-input-confirm {
+        width: 24;
+    }
+
     #help-dialog {
         width: 78;
         height: 23;
@@ -298,6 +341,10 @@ APP_CSS = """
         layers: base overlay;
     }
 
+    ShelfManagerScreen {
+        layout: vertical;
+    }
+
     StatusScreen {
         layers: base overlay;
     }
@@ -312,6 +359,81 @@ APP_CSS = """
 
     #log-body {
         height: 1fr;
+    }
+
+    #shelf-banner {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #shelf-body {
+        height: 1fr;
+    }
+
+    #shelf-left {
+        width: 34%;
+        min-width: 32;
+        border-right: solid $surface;
+    }
+
+    #shelf-middle {
+        width: 28%;
+        min-width: 28;
+        border-right: solid $surface;
+    }
+
+    #shelf-right {
+        width: 1fr;
+        padding: 0 1;
+    }
+
+    .shelf-pane {
+        height: 1fr;
+    }
+
+    .shelf-pane-title {
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #shelf-pending {
+        height: 4;
+        padding: 1 0;
+        border-bottom: solid $surface;
+    }
+
+    #shelf-list,
+    #shelf-version-list,
+    #shelf-preview {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #shelf-preview-title {
+        height: 1;
+        margin-bottom: 1;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #shelf-preview {
+        overflow-y: auto;
+        overflow-x: auto;
+        scrollbar-gutter: stable;
+        scrollbar-size-horizontal: 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-visibility: visible;
+    }
+
+    #shelf-detail {
+        height: 8;
+        padding: 1 0 0 0;
+        border-top: solid $surface;
     }
 
     #log-left {
@@ -455,6 +577,8 @@ APP_CSS = """
 
     LogEntryRow,
     LogPathRow,
+    ShelfRow,
+    ShelfVersionRow,
     OverlayMenuItem {
         height: 1;
     }
