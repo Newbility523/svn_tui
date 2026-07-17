@@ -48,6 +48,7 @@ class StatusActionTests(unittest.TestCase):
                 "R     Revert this Directory",
                 "C     Clean Up this Directory",
                 "X     Remove Unversioned...",
+                "S     Open Shelves",
             ],
         )
 
@@ -73,6 +74,7 @@ class StatusActionTests(unittest.TestCase):
                 "R     Revert this Directory",
                 "C     Clean Up this Directory",
                 "X     Remove Unversioned...",
+                "S     Open Shelves",
             ],
         )
         self.assertEqual(status_action_for_key("a", actions).option_id, "add")
@@ -97,6 +99,7 @@ class StatusActionTests(unittest.TestCase):
                 "R     Revert this Directory",
                 "C     Clean Up this Directory",
                 "X     Remove Unversioned...",
+                "S     Open Shelves",
             ],
         )
 

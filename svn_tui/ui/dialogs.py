@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 
 from rich.text import Text
 from textual import events
@@ -10,7 +11,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, RichLog, Static, TextArea
+from textual.widgets import Button, Input, Label, RichLog, Static, TextArea
 
 from svn_tui.ui.formatters import format_help_text
 
@@ -127,6 +128,113 @@ class ConfirmActionDialog(ModalScreen[bool]):
             return
         if event.button.id == "confirm-ok":
             self.action_confirm()
+
+
+@dataclass(frozen=True)
+class ShelfSaveRequest:
+    name: str | None
+    note: str
+
+
+class ShelfSaveDialog(ModalScreen[ShelfSaveRequest | None]):
+    BINDINGS = [
+        Binding(CANCEL_KEYS, "cancel", "Cancel", key_display=CANCEL_KEY_LABEL),
+        Binding(CONFIRM_KEYS, "submit", "Save", key_display=CONFIRM_KEY_LABEL),
+    ]
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        include_name: bool,
+        confirm_label: str,
+    ) -> None:
+        super().__init__()
+        self.dialog_title = title
+        self.include_name = include_name
+        self.confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="shelf-save-dialog"):
+            yield Label(self.dialog_title, id="shelf-save-title")
+            if self.include_name:
+                yield Label("Name (optional)", classes="shelf-input-label")
+                yield Input(
+                    id="shelf-name-input",
+                    placeholder="Leave empty for shelf-YYYYMMDD-HHMMSS",
+                    max_length=80,
+                )
+            yield Label("Note (optional)", classes="shelf-input-label")
+            yield Input(id="shelf-note-input", placeholder="Describe this version")
+            with Horizontal(id="shelf-save-actions"):
+                yield Button(f"{CANCEL_KEY_LABEL} Cancel", id="shelf-save-cancel")
+                yield Button(
+                    f"{CONFIRM_KEY_LABEL} {self.confirm_label}",
+                    id="shelf-save-confirm",
+                    variant="success",
+                )
+
+    def on_mount(self) -> None:
+        input_id = "#shelf-name-input" if self.include_name else "#shelf-note-input"
+        self.query_one(input_id, Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_submit(self) -> None:
+        name = None
+        if self.include_name:
+            value = self.query_one("#shelf-name-input", Input).value.strip()
+            name = value or None
+        note = self.query_one("#shelf-note-input", Input).value.strip()
+        self.dismiss(ShelfSaveRequest(name=name, note=note))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "shelf-save-cancel":
+            self.action_cancel()
+        elif event.button.id == "shelf-save-confirm":
+            self.action_submit()
+
+
+class ExportPatchDialog(ModalScreen[Path | None]):
+    BINDINGS = [
+        Binding(CANCEL_KEYS, "cancel", "Cancel", key_display=CANCEL_KEY_LABEL),
+        Binding(CONFIRM_KEYS, "submit", "Export", key_display=CONFIRM_KEY_LABEL),
+    ]
+
+    def __init__(self, default_directory: Path) -> None:
+        super().__init__()
+        self.default_directory = default_directory
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="export-patch-dialog"):
+            yield Label("Export Patch", id="export-patch-title")
+            yield Label("Destination file or directory", classes="shelf-input-label")
+            yield Input(str(self.default_directory), id="export-patch-input")
+            with Horizontal(id="export-patch-actions"):
+                yield Button(f"{CANCEL_KEY_LABEL} Cancel", id="export-patch-cancel")
+                yield Button(
+                    f"{CONFIRM_KEY_LABEL} Export",
+                    id="export-patch-confirm",
+                    variant="success",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#export-patch-input", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_submit(self) -> None:
+        value = self.query_one("#export-patch-input", Input).value.strip()
+        if value:
+            self.dismiss(Path(value))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "export-patch-cancel":
+            self.action_cancel()
+        elif event.button.id == "export-patch-confirm":
+            self.action_submit()
 
 
 class HelpDialog(ModalScreen[None]):

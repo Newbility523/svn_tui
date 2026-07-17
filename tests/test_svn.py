@@ -14,6 +14,7 @@ from svn_tui.services.svn import (
     build_svn_diff_args,
     build_svn_propget_args,
     build_svn_propset_args,
+    build_svn_patch_args,
     build_svn_revert_args,
     build_svn_resolve_args,
     build_svn_update_args,
@@ -107,6 +108,12 @@ class SvnCommandTests(unittest.TestCase):
             ["svn", "cat", "-r", "HEAD", "file.py"],
         )
 
+    def test_build_svn_patch_args_targets_working_copy(self) -> None:
+        self.assertEqual(
+            build_svn_patch_args(Path("saved.patch")),
+            ["svn", "patch", "saved.patch", "."],
+        )
+
 
 class SvnParsingTests(unittest.TestCase):
     def test_parse_svn_status_line_uses_working_copy_root(self) -> None:
@@ -168,6 +175,14 @@ class RunCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(output.splitlines(), ["hello"])
+
+    async def test_run_command_text_uses_requested_working_directory(self) -> None:
+        output = await run_command_text(
+            [sys.executable, "-c", "from pathlib import Path; print(Path.cwd())"],
+            cwd=Path("tests").resolve(),
+        )
+
+        self.assertEqual(Path(output.strip()), Path("tests").resolve())
 
     async def test_run_command_text_raises_with_output_and_stderr(self) -> None:
         with self.assertRaises(subprocess.CalledProcessError) as raised:

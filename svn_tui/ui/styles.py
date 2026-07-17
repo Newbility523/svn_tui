@@ -136,7 +136,9 @@ APP_CSS = """
 
     #confirm-dialog {
         width: 74;
-        height: 13;
+        max-width: 94%;
+        height: 18;
+        max-height: 100%;
         padding: 1 2;
         background: $surface;
         border: solid $error;
@@ -150,8 +152,12 @@ APP_CSS = """
     }
 
     #confirm-message {
-        height: 5;
+        height: 1fr;
+        min-height: 1;
         margin-top: 1;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 1;
     }
 
     #confirm-actions {
@@ -457,5 +463,124 @@ APP_CSS = """
     LogPathRow,
     OverlayMenuItem {
         height: 1;
+    }
+
+    ShelfSaveDialog,
+    ExportPatchDialog {
+        align: center middle;
+    }
+
+    #shelf-save-dialog,
+    #export-patch-dialog {
+        width: 78;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #shelf-save-title,
+    #export-patch-title {
+        height: 1;
+        width: 1fr;
+        content-align: center middle;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .shelf-input-label {
+        height: 1;
+        color: $text-muted;
+        margin-top: 1;
+    }
+
+    #shelf-name-input,
+    #shelf-note-input,
+    #export-patch-input {
+        height: 3;
+    }
+
+    #shelf-save-actions,
+    #export-patch-actions {
+        width: 1fr;
+        height: 3;
+        margin-top: 1;
+        align: right bottom;
+    }
+
+    #shelf-save-actions Button,
+    #export-patch-actions Button {
+        height: 3;
+        width: auto;
+        min-width: 16;
+        margin-left: 1;
+    }
+
+    ShelfManagerScreen {
+        layout: vertical;
+    }
+
+    #shelf-banner {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #shelf-body {
+        height: 1fr;
+    }
+
+    .shelf-pane {
+        height: 1fr;
+        border-right: solid $surface;
+    }
+
+    #shelf-list-pane {
+        width: 34%;
+        min-width: 30;
+    }
+
+    #shelf-version-pane {
+        width: 28%;
+        min-width: 26;
+    }
+
+    #shelf-detail-pane {
+        width: 1fr;
+        border-right: none;
+    }
+
+    .shelf-pane-title {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    #shelf-list,
+    #shelf-version-list,
+    #shelf-patch-preview {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #shelf-detail {
+        height: 12;
+        padding: 1;
+        overflow-y: auto;
+    }
+
+    #shelf-operation-status {
+        height: 2;
+        padding: 0 1;
+        background: $panel;
+    }
+
+    ShelfRow,
+    ShelfVersionRow {
+        height: 2;
     }
 """

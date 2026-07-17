@@ -66,10 +66,12 @@
       meta.json
 ```
 
-类 Unix 环境对应：
+默认位置由 `platformdirs` 按系统选择：
 
 ```text
-~/.local/share/svn-tui/shelves/<wc-fingerprint>/
+macOS:   ~/Library/Application Support/svn-tui/shelves/<wc-fingerprint>/
+Linux:   ~/.local/share/svn-tui/shelves/<wc-fingerprint>/
+Windows: %LOCALAPPDATA%\svn-tui\shelves\<wc-fingerprint>\
 ```
 
 `wc-fingerprint` 建议由以下信息生成：
@@ -112,29 +114,29 @@ Versions
 
 核心操作：
 
-- `New Shelf`：输入名称，创建新 shelf 并保存第一个版本。
+- `New Shelf`：名称可选；留空时按本地时间自动生成
+  `shelf-YYYYMMDD-HHMMSS`，同一秒重名时追加 `-02`、`-03`；创建后保存第一个版本。
 - `Save Checkpoint`：对当前 shelf 保存新版本，工作区不变。
 - `Shelve Selected`：对当前 shelf 保存新版本，然后只还原当前勾选路径。
 - `Unshelve Version`：选择 shelf version，先还原该 version 记录的路径，再应用该 version 的 patch；不处理 version 之外的其它本地修改。
 - `Export Patch`：把选中 version 导出为 `.patch` / `.diff`。
-- `Rename Shelf`：重命名 shelf。
 - `Delete Version`：删除单个版本。
 - `Delete Shelf`：删除整个 shelf，需二次确认。
 - `Open Folder` / `Copy Path`：方便用户定位本地存储。
 
 ### 第一阶段范围
 
-- [ ] 新增 shelf 存储服务，负责 app data 路径、working copy fingerprint、目录结构和 JSON 元数据读写。
-- [ ] 新增 `svn diff` patch 生成服务，支持保存当前勾选路径的已版本控制文本修改。
-- [ ] 新增 `New Shelf` 操作：创建 shelf，并允许立即保存第一个 checkpoint。
-- [ ] 新增 `Save Checkpoint` 操作：保存 patch 和 metadata，不修改 working copy。
-- [ ] 新增 `Shelve Selected` 操作：保存 patch 和 metadata 后，只对当前勾选路径执行安全还原。
-- [ ] 新增 `Unshelve Version` 操作：选择版本后，只针对该 version 记录的路径执行 revert + apply patch。
-- [ ] 新增独立 `ShelfManagerScreen`，能列出当前 working copy 的 shelves 和 versions。
-- [ ] 在状态菜单中增加 `Open Shelves` 入口，该入口只打开管理界面。
-- [ ] 增加确认弹窗，覆盖 `Shelve Selected` 清空勾选修改、`Unshelve Version` 覆盖当前修改、删除版本/删除 shelf。
-- [ ] 更新 README 和架构文档，说明 shelves 与 patches 的区别。
-- [ ] 增加 fixture 状态和测试，覆盖 save checkpoint、shelve selected、unshelve version 的基本链路。
+- [x] 新增 shelf 存储服务，负责 app data 路径、working copy fingerprint、目录结构和 JSON 元数据读写。
+- [x] 新增 `svn diff` patch 生成服务，支持保存当前勾选路径的已版本控制文本修改。
+- [x] 新增 `New Shelf` 操作：允许输入名称或留空自动生成名称，并立即保存第一个 checkpoint。
+- [x] 新增 `Save Checkpoint` 操作：保存 patch 和 metadata，不修改 working copy。
+- [x] 新增 `Shelve Selected` 操作：保存 patch 和 metadata 后，只对当前勾选路径执行安全还原。
+- [x] 新增 `Unshelve Version` 操作：选择版本后，只针对该 version 记录的路径执行 revert + apply patch。
+- [x] 新增独立 `ShelfManagerScreen`，能列出当前 working copy 的 shelves 和 versions。
+- [x] 在状态菜单中增加 `Open Shelves` 入口，该入口只打开管理界面。
+- [x] 增加确认弹窗，覆盖 `Shelve Selected` 清空勾选修改、`Unshelve Version` 覆盖当前修改、删除版本/删除 shelf。
+- [x] 更新 README 和架构文档，说明 shelves 与 patches 的区别。
+- [x] 增加 fixture 状态和测试，覆盖 save checkpoint、shelve selected、unshelve version 的基本链路。
 
 ### 后续阶段
 
@@ -161,7 +163,8 @@ Versions
 - [x] `Shelve Selected` 清空工作区时，只还原勾选路径，不处理整个当前 status 目录。
 - [x] 状态菜单入口命名为 `Open Shelves`，只负责打开管理界面，不直接保存或还原。
 - [x] `Shelf Manager` 做成独立 Screen，类似 `LogScreen` 的完整页面，而不是嵌在 log 或弹窗里。
-- [ ] 默认 shelf 名称是否要求用户输入，还是提供自动名称后允许重命名。
+- [x] 新建 shelf 不强制输入名称；留空时自动生成
+  `shelf-YYYYMMDD-HHMMSS`，重名时追加数字后缀；不支持重命名。
 - [x] `Unshelve Version` 以选中 version 为准；如果 version 路径当前已有本地修改，确认后丢弃这些路径上的当前修改并应用 version，不碰其它路径。
 
 ## Ranger 联动模式

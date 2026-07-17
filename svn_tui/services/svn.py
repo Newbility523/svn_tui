@@ -9,11 +9,13 @@ from pathlib import Path
 
 from svn_tui.config import LOG_ENTRY_LIMIT
 from svn_tui.models import SvnLogEntry, SvnLogPathEntry, SvnStatusEntry
+from svn_tui.shelf_models import WorkingCopyIdentity
 
 
-async def run_command_text(args: list[str]) -> str:
+async def run_command_text(args: list[str], *, cwd: Path | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
         *args,
+        cwd=str(cwd) if cwd is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -80,6 +82,10 @@ def build_svn_cat_args(path: Path, revision: str) -> list[str]:
     return ["svn", "cat", "-r", revision, str(path)]
 
 
+def build_svn_patch_args(patch_path: Path, target: Path = Path(".")) -> list[str]:
+    return ["svn", "patch", str(patch_path), str(target)]
+
+
 class SvnClient:
     def __init__(self, target: Path) -> None:
         self.target = target.expanduser().resolve()
@@ -90,6 +96,7 @@ class SvnClient:
         self.target_url = ""
         self.target_repo_path = ""
         self.repo_info_loaded = False
+        self.working_copy_info: WorkingCopyIdentity | None = None
 
     async def ensure_working_copy_root(self) -> None:
         if self.root_loaded:
@@ -111,6 +118,22 @@ class SvnClient:
                 entries.append(entry)
         return entries
 
+    async def status_paths(self, paths: list[Path]) -> list[SvnStatusEntry]:
+        await self.ensure_working_copy_root()
+        if not paths:
+            return []
+        relative_paths = [self.relative_working_copy_path(path) for path in paths]
+        stdout = await run_command_text(
+            ["svn", "st", "--", *relative_paths],
+            cwd=self.root,
+        )
+        entries: list[SvnStatusEntry] = []
+        for line in stdout.splitlines():
+            entry = parse_svn_status_line(line, self.root)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
     async def commit(self, message: str, paths: list[Path]) -> str:
         return await run_command_text(build_svn_commit_args(message, paths))
 
@@ -125,6 +148,30 @@ class SvnClient:
 
     async def diff_for_status_entry(self, entry: SvnStatusEntry) -> str:
         return await run_command_text(build_svn_diff_args([entry.path]))
+
+    async def diff_paths(self, paths: list[Path]) -> str:
+        await self.ensure_working_copy_root()
+        relative_paths = [Path(self.relative_working_copy_path(path)) for path in paths]
+        return await run_command_text(build_svn_diff_args(relative_paths), cwd=self.root)
+
+    async def apply_patch(self, patch_path: Path) -> str:
+        await self.ensure_working_copy_root()
+        return await run_command_text(
+            build_svn_patch_args(patch_path.expanduser().resolve()),
+            cwd=self.root,
+        )
+
+    async def path_base_revisions(self, paths: list[Path]) -> dict[str, str]:
+        await self.ensure_working_copy_root()
+        revisions: dict[str, str] = {}
+        for path in paths:
+            relative = self.relative_working_copy_path(path)
+            revision = await run_command_text(
+                ["svn", "info", "--show-item", "revision", relative],
+                cwd=self.root,
+            )
+            revisions[relative] = revision.strip()
+        return revisions
 
     async def revert_paths(self, paths: list[Path]) -> str:
         return await run_command_text(build_svn_revert_args(paths))
@@ -167,6 +214,39 @@ class SvnClient:
         else:
             self.target_repo_path = ""
         self.repo_info_loaded = True
+
+    async def working_copy_identity(self) -> WorkingCopyIdentity:
+        if self.working_copy_info is not None:
+            return self.working_copy_info
+        await self.ensure_working_copy_root()
+        probe = self.target if self.target.is_dir() else self.target.parent
+        repo_uuid, repo_root_url, relative_url, revision = await asyncio.gather(
+            run_command_text(["svn", "info", "--show-item", "repos-uuid", str(probe)]),
+            run_command_text(["svn", "info", "--show-item", "repos-root-url", str(probe)]),
+            run_command_text(["svn", "info", "--show-item", "relative-url", str(probe)]),
+            run_command_text(["svn", "info", "--show-item", "revision", str(probe)]),
+        )
+        target_relative_path = relative_url.strip()
+        if target_relative_path.startswith("^/"):
+            target_relative_path = target_relative_path[2:]
+        elif target_relative_path == "^":
+            target_relative_path = ""
+        self.working_copy_info = WorkingCopyIdentity(
+            wc_root=self.root,
+            repo_uuid=repo_uuid.strip(),
+            repo_root_url=repo_root_url.strip().rstrip("/"),
+            target_relative_path=target_relative_path.strip("/"),
+            base_revision=revision.strip(),
+        )
+        return self.working_copy_info
+
+    def relative_working_copy_path(self, path: Path) -> str:
+        resolved = path.expanduser().resolve()
+        try:
+            relative = resolved.relative_to(self.root.expanduser().resolve())
+        except ValueError as exc:
+            raise ValueError(f"Path is outside the working copy: {path}") from exc
+        return relative.as_posix() or "."
 
     async def recent_logs(self, limit: int = LOG_ENTRY_LIMIT) -> list[SvnLogEntry]:
         await self.ensure_repository_metadata()

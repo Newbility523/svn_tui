@@ -17,6 +17,10 @@ class LogScreen:
     pass
 
 
+class ShelfManagerScreen:
+    pass
+
+
 class UnknownScreen:
     pass
 
@@ -30,10 +34,12 @@ class NavigationTests(unittest.TestCase):
     def test_known_screens_have_distinct_background_styles(self) -> None:
         status_style = screen_navigation_style("Status")
         log_style = screen_navigation_style("Log")
+        shelf_style = screen_navigation_style("ShelfManager")
 
         self.assertNotEqual(status_style, log_style)
         self.assertIn("on dark_green", status_style)
         self.assertIn("on dark_blue", log_style)
+        self.assertIn("on dark_magenta", shelf_style)
 
     def test_format_navigation_bar_renders_colored_segments_in_order(self) -> None:
         rendered = format_navigation_bar(["Status", "Log"])

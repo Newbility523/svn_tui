@@ -1,6 +1,6 @@
 # 架构与业务链路
 
-`svn-tui` 是一个 Textual 应用。当前业务分为两个主界面：工作副本状态界面和仓库日志界面。重构后的目标是让界面、工具、样式、配置各自独立，后续新增界面时不需要继续扩张入口脚本。
+`svn-tui` 是一个 Textual 应用。当前业务分为三个主界面：工作副本状态、仓库日志和本地 Shelf Manager。界面、工具、样式、配置各自独立，新增界面时不需要继续扩张入口脚本。
 
 ## 分层结构
 
@@ -26,7 +26,8 @@ main.py
 - `svn_tui/app.py`：Textual App 外壳，只保留全局行为、全局快捷键和首屏选择。
 - `svn_tui/config.py`：集中管理预览阈值、列宽、日志条数、滚动间隔和主题配置。
 - `svn_tui/models.py`：保存 SVN 状态、日志、日志路径等业务数据结构。
-- `svn_tui/services/`：工具层，负责 SVN 命令、diff/blame、日志读取、文件预览索引。
+- `svn_tui/shelf_models.py`：保存 working copy identity、Shelf 和 Shelf Version 数据结构。
+- `svn_tui/services/`：工具层，负责 SVN 命令、diff/blame、日志读取、文件预览索引以及 Shelf 持久化与恢复。
 - `svn_tui/ui/screens/`：界面层，每个 Screen 对应一个完整界面。
 - `svn_tui/ui/widgets.py`：可复用组件，包括状态行、日志行、路径行、预览视图、弹出菜单项。
 - `svn_tui/ui/formatters.py`：界面文本格式化、列宽计算、路径截断、中文 cell 宽度处理。
@@ -70,6 +71,20 @@ main.py
 9. `Remove Unversioned...` 会先打开确认弹窗，确认后再执行 `svn cleanup --remove-unversioned -- <directory>`。
 10. `Commit`、`Clean Up this Directory` 和 `Remove Unversioned...` 使用 SVN 命令运行弹窗，实时展示 stdout/stderr，支持运行中取消。
 11. 提交、更新、还原和 cleanup 操作完成后刷新状态列表。
+
+## Shelf 链路
+
+1. Status 批量菜单的 `Open Shelves` 把当前勾选的状态条目传给独立 `ShelfManagerScreen`；没有勾选时仍可进入管理已有 Shelf。
+2. `SvnClient.working_copy_identity()` 读取 working copy root、仓库 UUID、仓库根 URL、目标相对路径和基准 revision。
+3. `ShelfStore` 对 identity 生成 fingerprint，并使用系统应用数据目录下的独立子目录保存 Shelf。
+4. 新建 Shelf 名称可选；留空时生成 `shelf-YYYYMMDD-HHMMSS`，同一秒重名时追加数字后缀。
+5. `Save Checkpoint` 从 working copy 根目录对勾选路径执行 `svn diff`，原子写入 `patch.diff` 和 `meta.json`，不改变工作副本。
+6. `Shelve Selected` 先完成同样的持久化，确认版本已经落盘后才对本次勾选路径执行 `svn revert`。
+7. `Unshelve Version` 根据版本元数据检查且仅检查记录的路径；这些路径已有修改时先确认，再 revert 并执行 `svn patch`。
+8. Patch 应用失败时 Shelf Version 不会删除，完整命令输出保留在 Shelf Manager 中供手动处理。
+9. Shelf Manager 提供 Patch 预览、导出、删除版本、删除 Shelf、打开目录和复制路径；不提供重命名。
+
+Shelf 是包含身份、版本序列和元数据的本地容器；Patch 只是单个 Shelf Version 的文本 diff 载体。初版只支持已版本控制的 `M` 状态普通文本文件，不处理未版本文件、二进制、冲突和复杂树变化。
 
 ## SVN 命令运行弹窗
 

@@ -10,6 +10,7 @@ from textual.widgets import Header
 from svn_tui.app import SvnTui
 from svn_tui.models import SvnStatusEntry
 from svn_tui.ui.dialogs import ConfirmActionDialog, SvnCommandDialog
+from svn_tui.ui.screens.shelves import ShelfManagerScreen
 from svn_tui.ui.widgets import StatusRow
 
 
@@ -193,8 +194,29 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
                     "X     Remove Unversioned...",
+                    "S     Open Shelves",
                 ],
             )
+
+    async def test_checked_action_menu_opens_shelf_manager_with_selected_entries(self) -> None:
+        app = SvnTui(Path("."))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.2)
+            status_screen = app.screen
+            entry = SvnStatusEntry(Path("README.md").resolve(), "M", " ", "M")
+            row = StatusRow(entry, Path(".").resolve())
+            row.selected_for_commit = True
+            await status_screen.list_view.clear()
+            await status_screen.list_view.append(row)
+            status_screen.list_view.index = 0
+            status_screen.list_view.focus()
+
+            await pilot.press("Z", "S")
+            await pilot.pause(0.1)
+
+            self.assertIsInstance(app.screen, ShelfManagerScreen)
+            self.assertEqual(app.screen.selected_entries, [entry])
 
     async def test_checked_action_menu_uses_batch_menu_for_one_checked_row(self) -> None:
         app = SvnTui(Path("."))
@@ -228,6 +250,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
                     "X     Remove Unversioned...",
+                    "S     Open Shelves",
                 ],
             )
             self.assertEqual(screen.status_action_title.content, "README.md")
@@ -274,6 +297,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
                     "X     Remove Unversioned...",
+                    "S     Open Shelves",
                 ],
             )
             self.assertEqual(screen.status_action_title.content, "Multi")
@@ -321,6 +345,7 @@ class StatusScreenTests(unittest.IsolatedAsyncioTestCase):
                     "R     Revert this Directory",
                     "C     Clean Up this Directory",
                     "X     Remove Unversioned...",
+                    "S     Open Shelves",
                 ],
             )
             self.assertEqual(screen.status_action_title.content, "Multi")

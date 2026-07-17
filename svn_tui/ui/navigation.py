@@ -10,6 +10,7 @@ from textual.widgets import Static
 SCREEN_NAVIGATION_STYLES = {
     "Status": "bold white on dark_green",
     "Log": "bold white on dark_blue",
+    "ShelfManager": "bold white on dark_magenta",
 }
 DEFAULT_NAVIGATION_STYLE = "bold white on grey23"
 

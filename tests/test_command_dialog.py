@@ -79,6 +79,35 @@ class SvnCommandDialogTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(results, [True])
             self.assertIsNot(app.screen, dialog)
 
+    async def test_confirm_action_dialog_keeps_buttons_visible_with_long_message(
+        self,
+    ) -> None:
+        app = SvnTui(Path("."))
+        dialog = ConfirmActionDialog(
+            "Overwrite Local Changes?",
+            "\n".join(
+                [
+                    "Unshelve will discard current changes on saved paths only:",
+                    "",
+                    *[f"- long/path/to/modified-file-{index}.py (M)" for index in range(8)],
+                ]
+            ),
+            confirm_label="Unshelve",
+        )
+
+        async with app.run_test(size=(80, 18)) as pilot:
+            await pilot.pause(0.2)
+            app.push_screen(dialog)
+            await pilot.pause(0.1)
+
+            box = dialog.query_one("#confirm-dialog")
+            actions = dialog.query_one("#confirm-actions")
+            confirm = dialog.query_one("#confirm-ok", Button)
+
+            self.assertLessEqual(actions.region.bottom, box.content_region.bottom)
+            self.assertLessEqual(confirm.region.bottom, box.content_region.bottom)
+            self.assertEqual(confirm.region.height, 3)
+
     async def test_command_dialog_streams_output_and_closes_after_finish(self) -> None:
         app = SvnTui(Path("."))
         dialog = SvnCommandDialog(

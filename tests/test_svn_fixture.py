@@ -73,6 +73,27 @@ class SvnFixtureTests(unittest.TestCase):
             self.assertTrue((root / "wc" / ".svn").exists())
             self.assertTrue((root / "repo").exists())
 
+    @unittest.skipUnless(
+        shutil.which("svn") and shutil.which("svnadmin"),
+        "svn and svnadmin are required for fixture smoke test",
+    )
+    def test_state_shelf_ready_creates_two_modified_text_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fixture"
+
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                exit_code = svn_fixture.main(
+                    ["--root", str(root), "state", "shelf-ready"]
+                )
+            status = svn_fixture.run(
+                ["svn", "status", "--", "src/app.py", "docs/guide.md"],
+                cwd=root / "wc",
+            ).stdout
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("M       src/app.py", status)
+            self.assertIn("M       docs/guide.md", status)
+
 
 if __name__ == "__main__":
     unittest.main()

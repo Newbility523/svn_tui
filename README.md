@@ -100,6 +100,7 @@ python3 tools/svn_fixture.py reset
 python3 tools/svn_fixture.py state commit-ready
 python3 tools/svn_fixture.py state conflict
 python3 tools/svn_fixture.py state large-preview
+python3 tools/svn_fixture.py state shelf-ready
 python3 tools/svn_fixture.py open status
 python3 tools/svn_fixture.py open log
 ```
@@ -123,11 +124,13 @@ python3 tools/svn_fixture.py open log
 - `svn_tui/app.py`：Textual App 外壳和全局快捷键。
 - `svn_tui/config.py`：预览、列表列宽、日志数量、滚动间隔、主题等全局配置。
 - `svn_tui/models.py`：SVN 状态、日志、日志路径等业务数据结构。
+- `svn_tui/shelf_models.py`：working copy identity、Shelf 和 Shelf Version 数据结构。
 - `svn_tui/services/`：SVN 命令调用和文件预览索引等工具层，不依赖具体界面。
+- `svn_tui/services/shelves.py`：Shelf 持久化、Checkpoint、Shelve、Unshelve、导出和清理服务。
 - `svn_tui/ui/styles.py`：Textual CSS 布局和样式。
 - `svn_tui/ui/widgets.py`：可复用 UI 组件和列表行渲染。
 - `svn_tui/ui/dialogs.py`：提交信息、帮助等弹窗。
-- `svn_tui/ui/screens/`：不同界面 Screen，目前包含状态界面和日志界面。
+- `svn_tui/ui/screens/`：不同界面 Screen，目前包含状态、日志和 Shelf Manager 界面。
 - `svn_tui/ui/formatters.py`、`svn_tui/ui/search.py`：界面展示格式化和列表搜索逻辑。
 - `svn_tui/utils/`：路径、大小格式化等跨层小工具。
 
@@ -157,6 +160,7 @@ python3 tools/svn_fixture.py open log
 - SVN commit 和目录级 cleanup 操作使用可滚动的命令运行弹窗，支持运行中取消和完成后回看输出。
 - 主界面按 `l` 打开最近日志全屏界面。
 - 状态列表按 `z` 打开当前条目的操作菜单，按 `Z` 打开勾选条目或当前目录的操作菜单。
+- 提供应用本地 Shelf，可以为勾选的已版本控制文本修改保存多个 Checkpoint、保存后清理工作区，并恢复任意版本。
 - 日志界面直接按仓库 URL 读取最近日志，不依赖工作副本先 `svn update`。
 - CLI 支持直接打开 status 或 log 初始界面，方便 ranger 等外部工具调用。
 - 日志界面支持查看 revision 列表、提交说明、变更路径列表，以及单文件历史 diff 预览。
@@ -226,8 +230,41 @@ python3 tools/svn_fixture.py open log
 - `R     Revert this Directory`：对当前 Status 目录执行 `svn revert -- <directory>`。
 - `C     Clean Up this Directory`：打开命令运行弹窗并执行 `svn cleanup -- <directory>`。
 - `X     Remove Unversioned...`：确认后打开命令运行弹窗并执行 `svn cleanup --remove-unversioned -- <directory>`。
+- `S     Open Shelves`：打开独立 Shelf Manager；该入口本身不会修改工作副本。
 
 菜单内 `j` / `k` 移动，`Enter` 触发当前菜单项，`Esc` 关闭菜单。
+
+## Shelves
+
+Shelf 是 `svn-tui` 管理的本地修改版本容器，不会提交到 SVN 仓库，也不会写入 `.svn`。每个 Shelf 可以包含多个版本；每个版本的 `patch.diff` 是用于预览、导出和恢复文本修改的载体，Patch 本身不是独立的 Shelf。
+
+使用流程：
+
+1. 在 Status 界面用 `Space` 勾选一个或多个 `M` 状态的普通文本文件。
+2. 按 `Z` 打开批量菜单，再按 `S` 进入 Shelf Manager。
+3. 按 `n` 创建 Shelf。名称可以留空，默认生成 `shelf-YYYYMMDD-HHMMSS`；不支持重命名。
+4. 后续可对当前 Shelf 保存 Checkpoint、Shelve 勾选修改，或恢复任意历史版本。
+
+Shelf Manager 快捷键：
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-l` | 返回 Status |
+| `Tab` | 在 Shelves 和 Versions 列表之间切换 |
+| `n` | 新建 Shelf 并保存第一个 Checkpoint |
+| `c` | 向当前 Shelf 保存 Checkpoint，工作区不变 |
+| `s` | 保存新版本并在确认后还原勾选路径 |
+| `u` | 恢复当前选中的 Shelf Version |
+| `e` | 导出当前版本的 `.diff` 文件 |
+| `d` | 确认后删除当前版本 |
+| `D` | 确认后删除整个 Shelf |
+| `o` | 在系统文件管理器中打开 Shelf 目录 |
+| `y` | 复制当前 Patch 或 Shelf 路径 |
+| `r` | 刷新 Shelf 列表 |
+
+默认存储位置由操作系统的应用数据目录决定，例如 macOS 为 `~/Library/Application Support/svn-tui/shelves/`，Linux 通常为 `~/.local/share/svn-tui/shelves/`，Windows 为 `%LOCALAPPDATA%\svn-tui\shelves\`。Shelf 按 working copy 根路径、仓库 UUID、仓库 URL 和目标相对路径生成的 fingerprint 隔离。
+
+当前第一版只接受已纳入 SVN、状态为 `M` 的普通文本文件。未版本文件、二进制文件、冲突、删除、移动和复制等复杂树变化会在保存前被拒绝，不会修改工作副本。`Shelve Selected` 先持久化 Patch 再执行 revert；`Unshelve` 只处理版本记录的路径，覆盖这些路径上的现有修改前会要求确认。
 
 ### SVN Command Dialog
 

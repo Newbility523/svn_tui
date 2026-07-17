@@ -51,6 +51,7 @@ SINGLE_STATUS_ACTIONS = [
 ADD_STATUS_ACTION = StatusAction("add", "a", "Add")
 IGNORE_STATUS_ACTION = StatusAction("ignore", "i", "Ignore")
 RESOLVE_WORKING_STATUS_ACTION = StatusAction("resolve", "s", "Resolve Working")
+OPEN_SHELVES_ACTION = StatusAction("open_shelves", "S", "Open Shelves")
 
 
 DIRECTORY_STATUS_ACTIONS = [
@@ -58,6 +59,7 @@ DIRECTORY_STATUS_ACTIONS = [
     StatusAction("revert_directory", "R", "Revert this Directory"),
     StatusAction("cleanup_directory", "C", "Clean Up this Directory"),
     StatusAction("remove_unversioned_directory", "X", "Remove Unversioned..."),
+    OPEN_SHELVES_ACTION,
 ]
 
 

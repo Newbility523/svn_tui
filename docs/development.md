@@ -112,6 +112,7 @@ python3 tools/svn_fixture.py list
 python3 tools/svn_fixture.py state mixed
 python3 tools/svn_fixture.py state conflict
 python3 tools/svn_fixture.py state large-preview
+python3 tools/svn_fixture.py state shelf-ready
 ```
 
 直接打开 `svn-tui`：
@@ -128,6 +129,7 @@ python3 tools/svn_fixture.py open log
 - `mixed`：包含 modified、added、copied、deleted、missing、unversioned 和 ignore property 变更。
 - `large-preview`：包含大文件、超长行、二进制文件和 versioned diff 预览样本。
 - `conflict`：通过第二份 working copy 制造真实 SVN 文本冲突。
+- `shelf-ready`：两个已版本控制文本文件处于 modified 状态，适合验证 Checkpoint、Shelve Selected 和 Unshelve Version；另带一个未版本文件用于确认初版范围拦截。
 
 涉及中文路径、列宽或截断逻辑时，建议额外做一个 smoke test：
 

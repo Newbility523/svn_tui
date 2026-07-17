@@ -9,6 +9,7 @@ description = "Textual TUI client for reviewing SVN working copies."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "platformdirs>=4.0",
     "textual>=8.2.6",
 ]
 
